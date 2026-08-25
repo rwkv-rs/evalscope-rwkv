@@ -1,6 +1,7 @@
 import argparse
-import httpx
 import json
+
+import httpx
 import pytest
 from openai.types.chat import ChatCompletion
 
@@ -13,7 +14,6 @@ from evalscope.config import TaskConfig
 from evalscope.constants import EvalType
 from evalscope.models.rwkv_openai import RWKVOpenAIAPI
 from evalscope.models.utils.rwkv import parse_rwkv_text_tool_calls
-
 
 TOOLS = [
     ToolInfo.model_validate({

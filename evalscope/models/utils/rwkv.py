@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Mapping
 
 from evalscope.api.tool import ToolInfo
 
-
 _TOOL_CALL_TEXT_PREFIXES = (
     '**Tool Call:**',
     '### Tool Call',
@@ -111,8 +110,7 @@ def _wire_tool_name(name: str, tools: List[ToolInfo]) -> str:
     if name in names:
         return name
     equivalents = [
-        candidate for candidate in names
-        if candidate.replace('.', '_') == name or candidate.replace('_', '.') == name
+        candidate for candidate in names if candidate.replace('.', '_') == name or candidate.replace('_', '.') == name
     ]
     return equivalents[0] if len(equivalents) == 1 else name
 

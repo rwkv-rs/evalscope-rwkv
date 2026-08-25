@@ -1,6 +1,7 @@
 import uuid
-from openai.types.chat import ChatCompletion
 from typing import Any, List, Optional
+
+from openai.types.chat import ChatCompletion
 
 from evalscope.api.model import ChatCompletionChoice, GenerateConfig
 from evalscope.api.tool import ToolInfo, parse_tool_call
