@@ -55,6 +55,7 @@ aigc             = {file = ["requirements/aigc.txt"]}
 sandbox          = {file = ["requirements/sandbox.txt"]}
 service          = {file = ["requirements/service.txt", "requirements/perf.txt"]}
 mcp              = {file = ["requirements/mcp.txt"]}
+scoreboard       = {file = ["requirements/scoreboard.txt"]}
 dev              = {file = ["requirements/dev.txt"]}
 docs             = {file = ["requirements/docs.txt"]}
 
@@ -90,7 +91,8 @@ all = {file = [
   "requirements/perf.txt",
   "requirements/app.txt",
   "requirements/aigc.txt",
-  "requirements/service.txt"
+  "requirements/service.txt",
+  "requirements/scoreboard.txt"
 ]}
 
 [tool.pytest.ini_options]

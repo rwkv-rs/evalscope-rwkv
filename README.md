@@ -232,6 +232,51 @@ wire shape, preserves the raw content in prediction metadata, and leaves tool
 schema validation and scoring to EvalScope. Disable this fallback with
 `--model-args text_tool_call_compat=false` when testing native tool calls only.
 
+### Migrate the Legacy Helicopter Scoreboard
+
+This downstream owns the one-time migration from the legacy Helicopter PostgreSQL schema to the RWKV Scoreboard
+contract v4. Install the dedicated database dependency before running it:
+
+```bash
+pip install -e '.[scoreboard]'
+```
+
+The legacy database did not persist weight-file SHA256 values and did not reliably persist WKV mode. Create a local
+model mapping that is not committed to Git:
+
+```json
+{
+  "legacy-model-name": {
+    "weight_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "weight_display_name": "RWKV-model.pth",
+    "wkv_mode": "fp32io16",
+    "wkv_mode_source": "historical-config-inference"
+  }
+}
+```
+
+Provide credentials through `LEGACY_SCOREBOARD_DSN` and `TARGET_SCOREBOARD_DSN`, or through the corresponding
+`{LEGACY,TARGET}_SCOREBOARD_DB_{HOST,PORT,USER,PASSWORD,NAME}` variables. The command is read-only by default:
+
+```bash
+python scripts/migrate_helicopter_scoreboard.py \
+  --model-map /absolute/path/to/model-map.json
+```
+
+Review the planned campaign, task, sample, and attempt counts before applying the migration:
+
+```bash
+python scripts/migrate_helicopter_scoreboard.py \
+  --model-map /absolute/path/to/model-map.json \
+  --apply
+```
+
+The write runs in one PostgreSQL transaction, uses deterministic identifiers, rejects conflicting target content,
+and is safe to retry. The latest results become one snapshot campaign per source so the Scoreboard dashboard can show
+the complete current matrix; superseded scores remain as individual history campaigns. Legacy `function_calling`
+results map to the `evalscope` source. Full legacy metrics and completion/eval/checker records remain available in
+diagnostics and sample attempts, together with their original timestamps and identifiers.
+
 ### Method 3. Using Python Code
 
 ```python
