@@ -82,6 +82,7 @@ DEFAULT_API_EVAL_BATCH_SIZE = 8
 
 REMOTE_API_EVAL_TYPES = frozenset({
     EvalType.OPENAI_API,
+    EvalType.RWKV_OPENAI_API,
     EvalType.OPENAI_RESPONSES_API,
     EvalType.ANTHROPIC_API,
     EvalType.LITELLM,
@@ -574,7 +575,11 @@ class TaskConfig(BaseArgument):
         elif self.model_task == ModelTask.TEXT_GENERATION:
             if self.eval_type == EvalType.CHECKPOINT:
                 return DEFAULT_TEXT_GEN_CHECKPOINT_CONFIG.copy()
-            elif self.eval_type in (EvalType.OPENAI_API, EvalType.OPENAI_RESPONSES_API):
+            elif self.eval_type in (
+                EvalType.OPENAI_API,
+                EvalType.RWKV_OPENAI_API,
+                EvalType.OPENAI_RESPONSES_API,
+            ):
                 return DEFAULT_TEXT_GEN_SERVICE_CONFIG.copy()
 
         return {}

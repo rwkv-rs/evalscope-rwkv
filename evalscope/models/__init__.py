@@ -4,12 +4,13 @@ from typing import TYPE_CHECKING
 from evalscope.utils.import_utils import _LazyModule
 
 if TYPE_CHECKING:
-    from .model_apis import llm_ckpt, mockllm, openai_api
+    from .model_apis import llm_ckpt, mockllm, openai_api, rwkv_openai_api
 
 else:
     _import_structure = {
         'model_apis': [
             'openai_api',
+            'rwkv_openai_api',
             'mockllm',
             'llm_ckpt',
         ]
