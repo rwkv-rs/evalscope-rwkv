@@ -24,10 +24,6 @@
 
 > ⭐ 如果你喜欢这个项目，请点击右上角的 "Star" 按钮支持我们。你的支持是我们前进的动力！
 
-> **EvalScope-RWKV** 是 [ModelScope EvalScope](https://github.com/modelscope/evalscope)
-> 面向 RWKV 的下游项目。项目保留上游架构，并新增显式的 `rwkv_openai_api`
-> 后端，用于评测兼容 OpenAI API 的 RWKV 服务。
-
 ## 📝 简介
 
 EvalScope 是由[魔搭社区](https://modelscope.cn/)打造的一站式大模型评测框架。一行命令即可开始评测，支持模型能力评估、推理性能压测和结果可视化。
@@ -207,29 +203,6 @@ evalscope eval \
  --datasets gsm8k arc \
  --limit 5
 ```
-
-### 评测兼容 OpenAI API 的 RWKV 服务
-
-从源码安装本项目，并显式选择 RWKV 后端：
-
-```bash
-git clone https://github.com/rwkv-rs/evalscope-rwkv.git
-cd evalscope-rwkv
-pip install -e .
-
-evalscope eval \
- --model rwkv-model-name \
- --api-url http://127.0.0.1:8000/v1 \
- --api-key EMPTY \
- --eval-type rwkv_openai_api \
- --datasets general_fc \
- --limit 5
-```
-
-该后端会原样保留原生 OpenAI `tool_calls`。如果 RWKV 服务将 BFCL 风格的
-JSON 工具调用放在 `message.content` 中，兼容层只转换传输结构，并把原始内容
-保留在预测元数据里；工具 schema 校验和评分仍由 EvalScope 负责。若只验证
-原生工具调用，可通过 `--model-args text_tool_call_compat=false` 关闭文本兼容回退。
 
 ### 方式3. 使用 Python 代码
 

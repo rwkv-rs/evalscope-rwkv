@@ -24,11 +24,6 @@
 
 > ⭐ If you like this project, please click the "Star" button in the upper right corner to support us. Your support is our motivation to move forward!
 
-> **EvalScope-RWKV** is an RWKV-focused downstream of
-> [ModelScope EvalScope](https://github.com/modelscope/evalscope). It keeps the
-> upstream architecture and adds the explicit `rwkv_openai_api` backend for
-> OpenAI-compatible RWKV services.
-
 ## 📝 Introduction
 
 EvalScope is a one-stop LLM evaluation framework built by the [ModelScope Community](https://modelscope.cn/). Just one command to start — it supports model capability evaluation, inference performance stress testing, and result visualization.
@@ -207,30 +202,6 @@ evalscope eval \
  --datasets gsm8k arc \
  --limit 5
 ```
-
-### Evaluate an RWKV OpenAI-Compatible Endpoint
-
-Install this downstream from source, then select the RWKV backend explicitly:
-
-```bash
-git clone https://github.com/rwkv-rs/evalscope-rwkv.git
-cd evalscope-rwkv
-pip install -e .
-
-evalscope eval \
- --model rwkv-model-name \
- --api-url http://127.0.0.1:8000/v1 \
- --api-key EMPTY \
- --eval-type rwkv_openai_api \
- --datasets general_fc \
- --limit 5
-```
-
-The backend forwards native OpenAI `tool_calls` unchanged. If an RWKV server
-returns a BFCL-style JSON tool call in `message.content`, it converts only the
-wire shape, preserves the raw content in prediction metadata, and leaves tool
-schema validation and scoring to EvalScope. Disable this fallback with
-`--model-args text_tool_call_compat=false` when testing native tool calls only.
 
 ### Method 3. Using Python Code
 
