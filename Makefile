@@ -136,7 +136,7 @@ package-build:
 
 .PHONY: package-check
 package-check:
-	$(PYTHON) scripts/release/verify_package.py --dist-dir "$(DIST_DIR)"
+	$(PYTHON) tools/release/verify_package.py --dist-dir "$(DIST_DIR)"
 	$(PYTHON) -m twine check "$(DIST_DIR)"/*
 
 # ============================================================================
