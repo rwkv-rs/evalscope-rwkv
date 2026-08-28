@@ -1,4 +1,4 @@
-"""Migrate legacy EvalScope scoreboard rows to a new Scoreboard over HTTP."""
+"""Migrate legacy EvalScope Scoreboard rows to a new Scoreboard over HTTP."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 SCHEMA_VERSION = 'scoreboard-v1'
+
 MIGRATION_CONTRACT = {
     'name': 'legacy-evalscope-scoreboard',
     'source': 'postgresql-read-only',
@@ -210,14 +211,7 @@ def publish_bundle(
     )
     campaign_id = campaign_receipt['campaign_id']
     if campaign_receipt['status'] == 'complete':
-        return {
-            'campaign': {
-                'http_status': campaign_status,
-                **campaign_receipt
-            },
-            'tasks': [],
-            'finalize': None,
-        }
+        return {'campaign': {'http_status': campaign_status, **campaign_receipt}, 'tasks': [], 'finalize': None}
     task_receipts = []
     for task in tasks:
         publication = {**task, 'campaign_id': campaign_id}
@@ -233,7 +227,6 @@ def publish_bundle(
             opener=opener,
         )
         task_receipts.append({'http_status': task_status, **receipt})
-        task = publication = body = None
     finalize_status, finalize_receipt = send(
         base_url,
         token,

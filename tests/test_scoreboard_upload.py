@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from scripts.upload_score import (
+from tools.scoreboard.migrate_legacy import (
     SOURCE_QUERY,
     build_migration_bundle,
     canonical_json,
