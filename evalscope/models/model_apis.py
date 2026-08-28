@@ -18,13 +18,6 @@ def openai_api() -> type[ModelAPI]:
     return OpenAICompatibleAPI
 
 
-@register_model_api(name='rwkv_openai_api')
-def rwkv_openai_api() -> type[ModelAPI]:
-    from .rwkv_openai import RWKVOpenAIAPI
-
-    return RWKVOpenAIAPI
-
-
 @register_model_api(name='openai_responses_api')
 def openai_responses_api() -> type[ModelAPI]:
     from .openai_responses import OpenAIResponsesAPI
