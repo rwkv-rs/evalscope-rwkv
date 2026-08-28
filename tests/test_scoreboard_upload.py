@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from evalscope.utils.scoreboard import publish_benchmark_callback
 from tools.scoreboard.migrate_legacy import (
     SOURCE_QUERY,
     build_migration_bundle,
@@ -35,6 +36,111 @@ MODEL_MAP = {
         'wkv_mode': 'fp32io16',
     },
 }
+
+
+def write_native_artifacts(root: Any) -> Any:
+    model_dir = 'rwkv7-g1i-1.5b'
+    benchmark = 'general_fc'
+    (root / 'configs').mkdir()
+    (root / 'reports' / model_dir).mkdir(parents=True)
+    (root / 'predictions' / model_dir).mkdir(parents=True)
+    (root / 'reviews' / model_dir).mkdir(parents=True)
+    config = {
+        'evalscope_version': '1.11.0',
+        'eval_type': 'rwkv_openai_api',
+        'generation_config': {'temperature': 0.0, 'max_tokens': 2048},
+        'limit': None,
+        'repeats': 1,
+        'seed': 42,
+        'resolved_benchmarks': {
+            benchmark: {
+                'dataset_id': 'evalscope/general_fc',
+                'eval_split': 'test',
+                'prompt_template': 'User: {question}\nAssistant:',
+                'extra_params': {'use_cot': False},
+            },
+        },
+        'evaluation_identity': {
+            'benchmarks': {benchmark: {'evaluation_version': 'v4', 'fingerprint': 'sha256:abc'}},
+        },
+    }
+    report = {
+        'schema_version': 2,
+        'dataset_pretty_name': 'Function Call',
+        'primary_metric_identity': {'name': 'accuracy', 'aggregation': 'mean', 'dimensions': {}},
+        'metrics': [{
+            'identity': {'name': 'accuracy', 'aggregation': 'mean', 'dimensions': {}},
+            'score': 0.75,
+            'semantics': {'display_multiplier': 100.0},
+        }],
+        'execution_summary': {'requested': 1, 'succeeded': 1, 'errored': 0, 'incomplete': False},
+    }
+    prediction = {
+        'index': 7,
+        'model_output': {
+            'choices': [{
+                'message': {'content': '', 'tool_calls': [{'function': {'name': 'weather', 'arguments': '{}'}}]},
+                'stop_reason': 'stop',
+            }],
+            'usage': {'output_tokens': 9},
+            'time': 0.125,
+        },
+        'messages': [{'role': 'user', 'content': 'Call weather.'}, {'role': 'assistant', 'content': ''}],
+    }
+    review = {
+        'index': 7,
+        'target': {'name': 'weather'},
+        'messages': prediction['messages'],
+        'sample_score': {
+            'score': {
+                'value': {'accuracy': 1.0},
+                'status': 'success',
+                'extracted_prediction': {'name': 'weather'},
+                'prediction': {'name': 'weather', 'arguments': {}},
+                'explanation': None,
+            },
+            'group_id': 'weather-7',
+            'generation_index': 0,
+            'sample_metadata': {'case': 'weather'},
+        },
+    }
+    metadata = {
+        'weight_sha256': 'b' * 64,
+        'weight_display_name': 'rwkv7-g1i-1.5b.pth',
+        'wkv_mode': 'fp32io16',
+        'comparison': {
+            'model': {'label': 'RWKV G1I 1.5B', 'architecture': 'RWKV7', 'generation': 'G1I', 'parameters': '1.5B'},
+            'coordinates': [{
+                'comparison': {
+                    'id': 'generation',
+                    'label': 'G1H vs G1I',
+                    'short_label': 'Generation',
+                    'a_label': 'G1H',
+                    'b_label': 'G1I',
+                    'contract': 'Only the model generation changes.',
+                },
+                'parameter_group': {
+                    'id': '1.5b',
+                    'label': '1.5B',
+                    'a_model': {'label': 'RWKV G1H 1.5B', 'architecture': 'RWKV7',
+                                'generation': 'G1H', 'parameters': '1.5B'},
+                    'b_model': {'label': 'RWKV G1I 1.5B', 'architecture': 'RWKV7',
+                                'generation': 'G1I', 'parameters': '1.5B'},
+                    'parameter_delta_percent': 0.0,
+                    'comparable': True,
+                },
+                'arm': 'b',
+            }],
+        },
+    }
+    (root / 'configs' / 'task_config.yaml').write_text(json.dumps(config), encoding='utf-8')
+    (root / 'reports' / model_dir / f'{benchmark}.json').write_text(json.dumps(report), encoding='utf-8')
+    row_name = f'{benchmark}_default.jsonl'
+    (root / 'predictions' / model_dir / row_name).write_text(json.dumps(prediction) + '\n', encoding='utf-8')
+    (root / 'reviews' / model_dir / row_name).write_text(json.dumps(review) + '\n', encoding='utf-8')
+    metadata_path = root / 'scoreboard.json'
+    metadata_path.write_text(json.dumps(metadata), encoding='utf-8')
+    return model_dir, benchmark, metadata_path
 
 
 def source_rows() -> list[dict[str, Any]]:
@@ -138,6 +244,62 @@ class Response:
 
     def read(self) -> bytes:
         return self.body
+
+
+def test_native_callback_publishes_saved_score_io_and_decoding_config(tmp_path: Any, monkeypatch: Any) -> None:
+    from evalscope.utils import scoreboard
+
+    model_id, benchmark, metadata_path = write_native_artifacts(tmp_path)
+    campaign_id = '00000000-0000-0000-0000-000000000001'
+    requests = []
+    responses = iter([
+        Response(201, {'campaign_id': campaign_id, 'action': 'created', 'status': 'incomplete'}),
+        Response(201, {'evaluation_id': 'evaluation-id', 'action': 'created'}),
+        Response(200, {'campaign_id': campaign_id, 'status': 'complete', 'task_count': 1}),
+    ])
+
+    def opener(request: Any, *, timeout: int) -> Response:
+        requests.append(request)
+        assert timeout == 60
+        return next(responses)
+
+    monkeypatch.setenv('SCOREBOARD_API_BASE_URL', 'http://scoreboard.test')
+    monkeypatch.setenv('SCOREBOARD_PUBLICATION_TOKEN', 'publication-token')
+    monkeypatch.setattr(scoreboard, 'urlopen', opener)
+    receipt = publish_benchmark_callback(str(tmp_path), model_id, benchmark, str(metadata_path))
+
+    assert receipt['task']['evaluation_id'] == 'evaluation-id'
+    assert [request.get_method() for request in requests] == ['POST', 'PUT', 'POST']
+    campaign = json.loads(gzip.decompress(requests[0].data))
+    publication = json.loads(gzip.decompress(requests[1].data))
+    assert campaign['expected_tasks'] == [publication['task']]
+    assert publication['campaign_id'] == campaign_id
+    assert publication['primary_metric'] == 'accuracy'
+    assert publication['metrics'] == {'accuracy': 0.75}
+    assert publication['sampling_config'] == {'max_tokens': 2048, 'temperature': 0.0}
+    assert publication['comparison']['samples'] == 1
+    assert publication['comparison']['benchmark']['score_multiplier'] == 100.0
+    assert publication['result_files'] == []
+    sample = publication['samples'][0]
+    assert sample['answer']['outcome'] == 'correct'
+    assert sample['answer']['ground_truth'] == '{"name":"weather"}'
+    assert sample['answer']['raw_completion'] == '[{"function":{"arguments":"{}","name":"weather"}}]'
+    assert sample['answer']['assembled_prompt'] == '[{"content":"Call weather.","role":"user"}]'
+    assert sample['answer']['generated_tokens'] == 9
+    assert sample['answer']['latency_ms'] == 125.0
+    assert sample['model_response']['tool_calls'][0]['function']['name'] == 'weather'
+
+
+def test_native_callback_checks_scoreboard_request_limits(tmp_path: Any, monkeypatch: Any) -> None:
+    from evalscope.utils import scoreboard
+
+    model_id, benchmark, metadata_path = write_native_artifacts(tmp_path)
+    monkeypatch.setenv('SCOREBOARD_API_BASE_URL', 'http://scoreboard.test')
+    monkeypatch.setenv('SCOREBOARD_PUBLICATION_TOKEN', 'publication-token')
+    monkeypatch.setattr(scoreboard, 'MAX_UNCOMPRESSED_BYTES', 1)
+
+    with pytest.raises(ValueError, match='256 MiB raw limit'):
+        publish_benchmark_callback(str(tmp_path), model_id, benchmark, str(metadata_path))
 
 
 def test_publish_bundle_uses_scoreboard_http_lifecycle() -> None:
