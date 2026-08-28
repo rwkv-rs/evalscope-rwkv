@@ -206,6 +206,16 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
             for i, evaluator in enumerate(pbar):
                 res_dict = evaluator.eval()
                 eval_results[evaluator.benchmark_name] = res_dict
+                publication_metadata = os.environ.get('SCOREBOARD_PUBLICATION_METADATA')
+                if publication_metadata:
+                    from evalscope.utils.scoreboard import publish_benchmark_callback
+                    receipt = publish_benchmark_callback(
+                        outputs.outputs_dir,
+                        task_config.model_id,
+                        evaluator.benchmark_name,
+                        publication_metadata,
+                    )
+                    logger.info(f"Published {evaluator.benchmark_name} to Scoreboard: {receipt['task']}")
                 # Release evaluator immediately after eval to avoid
                 # accumulating all benchmark objects in memory simultaneously
                 evaluators[i] = None
