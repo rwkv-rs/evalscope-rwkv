@@ -1,0 +1,1 @@
+"""Standalone Scoreboard publication tools."""
