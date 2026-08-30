@@ -18,12 +18,16 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 SCHEMA_VERSION = 'scoreboard-v1'
+MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_SAMPLES_PER_OUTCOME = 20
 
 MIGRATION_CONTRACT = {
     'name': 'legacy-evalscope-scoreboard',
     'source': 'postgresql-read-only',
     'target': 'scoreboard-v1-http',
-    'version': 1,
+    'version': 2,
+    'max_samples_per_outcome': MAX_SAMPLES_PER_OUTCOME,
 }
 
 SOURCE_QUERY = r'''
@@ -180,11 +184,15 @@ def send(
 ) -> tuple[int, dict[str, Any]]:
     body = canonical_json(payload) if payload is not None else None
     headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': idempotency_key}
+    compressed = None
     if body is not None:
+        compressed = gzip.compress(body)
+        if len(body) > MAX_UNCOMPRESSED_BYTES or len(compressed) > MAX_COMPRESSED_BYTES:
+            raise ValueError('Scoreboard publication exceeds the 64 MiB compressed or 256 MiB raw limit')
         headers.update({'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
     request = Request(
         f"{base_url.rstrip('/')}{path}",
-        data=gzip.compress(body) if body is not None else None,
+        data=compressed,
         method=method,
         headers=headers,
     )
@@ -406,7 +414,7 @@ def _sample(
     sample_index: int,
     row: Mapping[str, Any],
     include_answer: bool,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, str]:
     messages = row.get('messages') or []
     prompt_messages = [message for message in messages if message.get('role') != 'assistant']
     sample_score = row.get('sample_score') or {}
@@ -458,17 +466,7 @@ def _sample(
         },
         'answer': answer,
     }
-    return sample, stop_reason in {'max_tokens', 'model_length'}
-
-
-def _scalar_metrics(value: Any) -> dict[str, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {
-        str(name): float(metric)
-        for name, metric in value.items()
-        if not isinstance(metric, bool) and isinstance(metric, (int, float)) and math.isfinite(float(metric))
-    }
+    return sample, stop_reason in {'max_tokens', 'model_length'}, outcome
 
 
 def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
@@ -500,15 +498,22 @@ def _task_publication(
     benchmark = str(task['benchmark_name'])
     coordinate = _comparison_coordinate(task, models)
     samples = []
+    outcome_counts: dict[str, int] = {}
     truncated = 0
     evaluated = 0
+    total = 0
     for row in rows:
-        sample, is_truncated = _sample(len(samples), row, coordinate is not None)
-        samples.append(sample)
+        sample, is_truncated, outcome = _sample(len(samples), row, coordinate is not None)
+        total += 1
         truncated += is_truncated
         evaluated += row.get('eval_id') is not None
-    metrics = _scalar_metrics(task['metrics'])
-    primary_metric = 'score' if 'score' in metrics else sorted(metrics)[0]
+        if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
+            continue
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        samples.append(sample)
+    # Legacy EvalScope stores its avg@1 result under the generic top-level
+    # ``score`` key. Publish the aggregation name expected by the Scoreboard.
+    metrics = {'avg@1': float(task['metrics']['score'])}
     comparison = None
     if coordinate is not None:
         comparison_value, selected_model = coordinate
@@ -530,7 +535,7 @@ def _task_publication(
             },
             'coordinates': [comparison_value],
             'samples': len(samples),
-            'truncation_rate': truncated / len(samples) if samples else 0.0,
+            'truncation_rate': truncated / total if total else 0.0,
         }
     return {
         'schema_version': SCHEMA_VERSION,
@@ -548,13 +553,14 @@ def _task_publication(
             'framework': 'evalscope'
         },
         'sampling_config': task.get('sampling_config') or {},
-        'primary_metric': primary_metric,
+        'primary_metric': 'avg@1',
         'metrics': metrics,
         'diagnostics': {
             'legacy_metrics': task['metrics'],
             'source_counts': {
-                'completions': len(samples),
+                'completions': total,
                 'evaluated': evaluated,
+                'uploaded': len(samples),
             },
         },
         'samples': samples,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+from copy import deepcopy
 from typing import Any
 
 import pytest
@@ -38,7 +39,7 @@ MODEL_MAP = {
 }
 
 
-def write_native_artifacts(root: Any) -> Any:
+def write_native_artifacts(root: Any, scores: list[float | None] | None = None) -> Any:
     model_dir = 'rwkv7-g1i-1.5b'
     benchmark = 'general_fc'
     (root / 'configs').mkdir()
@@ -136,8 +137,28 @@ def write_native_artifacts(root: Any) -> Any:
     (root / 'configs' / 'task_config.yaml').write_text(json.dumps(config), encoding='utf-8')
     (root / 'reports' / model_dir / f'{benchmark}.json').write_text(json.dumps(report), encoding='utf-8')
     row_name = f'{benchmark}_default.jsonl'
-    (root / 'predictions' / model_dir / row_name).write_text(json.dumps(prediction) + '\n', encoding='utf-8')
-    (root / 'reviews' / model_dir / row_name).write_text(json.dumps(review) + '\n', encoding='utf-8')
+    predictions = []
+    reviews = []
+    for index, value in enumerate(scores or [1.0], start=7):
+        prediction_row = deepcopy(prediction)
+        prediction_row['index'] = index
+        review_row = deepcopy(review)
+        review_row['index'] = index
+        review_row['sample_score']['group_id'] = f'weather-{index}'
+        if value is None:
+            prediction_row['model_output']['choices'][0]['message'] = {'content': '', 'tool_calls': []}
+            review_row['sample_score']['score']['prediction'] = ''
+            review_row['sample_score']['score']['value'] = {}
+        else:
+            review_row['sample_score']['score']['value']['accuracy'] = value
+        predictions.append(prediction_row)
+        reviews.append(review_row)
+    (root / 'predictions' / model_dir / row_name).write_text(
+        ''.join(f'{json.dumps(row)}\n' for row in predictions), encoding='utf-8'
+    )
+    (root / 'reviews' / model_dir / row_name).write_text(
+        ''.join(f'{json.dumps(row)}\n' for row in reviews), encoding='utf-8'
+    )
     metadata_path = root / 'scoreboard.json'
     metadata_path.write_text(json.dumps(metadata), encoding='utf-8')
     return model_dir, benchmark, metadata_path
@@ -180,7 +201,11 @@ def source_rows() -> list[dict[str, Any]]:
         'git_hash': 'abc123',
         'sampling_config': {'temperature': 0},
         'cot_mode': 'none',
-        'metrics': {'score': 0.5, 'not-a-number': 'ignored'},
+        'metrics': {
+            'score': 0.5,
+            'imported_evals': 2,
+            'not-a-number': 'ignored',
+        },
     }
     sample = {
         'kind': 'sample',
@@ -249,7 +274,8 @@ class Response:
 def test_native_callback_publishes_saved_score_io_and_decoding_config(tmp_path: Any, monkeypatch: Any) -> None:
     from evalscope.utils import scoreboard
 
-    model_id, benchmark, metadata_path = write_native_artifacts(tmp_path)
+    scores = [1.0] * 21 + [0.0] * 21 + [0.5] * 21 + [None] * 21
+    model_id, benchmark, metadata_path = write_native_artifacts(tmp_path, scores)
     campaign_id = '00000000-0000-0000-0000-000000000001'
     requests = []
     responses = iter([
@@ -277,9 +303,17 @@ def test_native_callback_publishes_saved_score_io_and_decoding_config(tmp_path: 
     assert publication['primary_metric'] == 'accuracy'
     assert publication['metrics'] == {'accuracy': 0.75}
     assert publication['sampling_config'] == {'max_tokens': 2048, 'temperature': 0.0}
-    assert publication['comparison']['samples'] == 1
+    assert publication['comparison']['samples'] == 80
     assert publication['comparison']['benchmark']['score_multiplier'] == 100.0
+    assert publication['diagnostics']['samples_total'] == 84
+    assert publication['diagnostics']['samples_uploaded'] == 80
     assert publication['result_files'] == []
+    assert [sample['sample_index'] for sample in publication['samples']] == list(range(80))
+    outcomes = [sample['answer']['outcome'] for sample in publication['samples']]
+    assert outcomes.count('correct') == 20
+    assert outcomes.count('incorrect') == 20
+    assert outcomes.count('undetermined') == 20
+    assert outcomes.count('unanswered') == 20
     sample = publication['samples'][0]
     assert sample['answer']['outcome'] == 'correct'
     assert sample['answer']['ground_truth'] == '{"name":"weather"}'
@@ -300,6 +334,16 @@ def test_native_callback_checks_scoreboard_request_limits(tmp_path: Any, monkeyp
 
     with pytest.raises(ValueError, match='256 MiB raw limit'):
         publish_benchmark_callback(str(tmp_path), model_id, benchmark, str(metadata_path))
+
+
+def test_migration_upload_checks_scoreboard_request_limits(monkeypatch: Any) -> None:
+    from tools.scoreboard import migrate_legacy
+
+    monkeypatch.setattr(migrate_legacy, 'MAX_UNCOMPRESSED_BYTES', 1)
+    with pytest.raises(ValueError, match='256 MiB raw limit'):
+        migrate_legacy.send(
+            'http://scoreboard.test', 'publication-token', 'POST', '/campaigns', 'campaign:key', CAMPAIGN
+        )
 
 
 def test_publish_bundle_uses_scoreboard_http_lifecycle() -> None:
@@ -385,9 +429,9 @@ def test_build_migration_bundle_preserves_scores_outputs_and_answers() -> None:
     assert campaign['configured_benchmarks'] == ['bfcl_v4']
     assert campaign['expected_tasks'] == [publication['task']]
     assert len(campaign['run_key']) == 64
-    assert publication['metrics'] == {'score': 0.5}
-    assert publication['primary_metric'] == 'score'
-    assert publication['diagnostics']['source_counts'] == {'completions': 2, 'evaluated': 1}
+    assert publication['metrics'] == {'avg@1': 0.5}
+    assert publication['primary_metric'] == 'avg@1'
+    assert publication['diagnostics']['source_counts'] == {'completions': 2, 'evaluated': 1, 'uploaded': 2}
     assert publication['comparison']['model']['generation'] == 'G1H'
     coordinate = publication['comparison']['coordinates'][0]
     assert coordinate['arm'] == 'a'
@@ -413,6 +457,50 @@ def test_build_migration_bundle_preserves_scores_outputs_and_answers() -> None:
     }
     assert unanswered['answer']['outcome'] == 'unanswered'
     assert unanswered['answer']['fail_reason'] == 'no_answer'
+
+
+def test_migration_limits_evidence_per_outcome() -> None:
+    rows = source_rows()
+    correct = rows[-2]
+    correct_samples = [{
+        **correct,
+        'completion_id': 1000 + index,
+        'sample_index': index,
+        'source_index': index,
+        'eval_id': 2000 + index,
+    } for index in range(21)]
+    incorrect_samples = [{
+        **correct,
+        'completion_id': 3000 + index,
+        'sample_index': 21 + index,
+        'source_index': 21 + index,
+        'eval_id': 4000 + index,
+        'answer': 'wrong',
+        'is_passed': False,
+    } for index in range(21)]
+    unanswered_samples = [{
+        **correct,
+        'completion_id': 5000 + index,
+        'sample_index': 42 + index,
+        'source_index': 42 + index,
+        'eval_id': None,
+        'answer': None,
+        'is_passed': None,
+    } for index in range(21)]
+    samples = [*correct_samples, *incorrect_samples, *unanswered_samples]
+    _campaign, publications = build_migration_bundle([*rows[:3], *samples], MODEL_MAP)
+    publication = next(iter(publications))
+
+    assert [sample['sample_index'] for sample in publication['samples']] == list(range(60))
+    outcomes = [sample['answer']['outcome'] for sample in publication['samples']]
+    assert outcomes.count('correct') == 20
+    assert outcomes.count('incorrect') == 20
+    assert outcomes.count('unanswered') == 20
+    assert publication['diagnostics']['source_counts'] == {
+        'completions': 63,
+        'evaluated': 42,
+        'uploaded': 60,
+    }
 
 
 def test_bundle_is_streamed_and_requires_every_model_mapping() -> None:
