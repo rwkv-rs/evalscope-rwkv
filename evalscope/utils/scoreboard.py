@@ -15,9 +15,14 @@ from urllib.request import Request, urlopen
 import yaml
 
 SCHEMA_VERSION = 'scoreboard-v1'
-MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
-MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
-CONTRACT = {'producer': 'evalscope', 'artifact_schema': 2, 'publication_schema': SCHEMA_VERSION}
+MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024, 256 * 1024 * 1024
+MAX_SAMPLES_PER_OUTCOME = 20
+CONTRACT = {
+    'producer': 'evalscope',
+    'artifact_schema': 3,
+    'publication_schema': SCHEMA_VERSION,
+    'max_samples_per_outcome': MAX_SAMPLES_PER_OUTCOME,
+}
 
 
 def _json(value: Any) -> bytes:
@@ -29,14 +34,7 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_json(value)).hexdigest()
 
 
-def _send(
-    base_url: str,
-    token: str,
-    method: str,
-    path: str,
-    idempotency_key: str,
-    payload: Mapping[str, Any] | None,
-) -> tuple[int, dict[str, Any]]:
+def _send(base_url, token, method, path, idempotency_key, payload) -> tuple[int, dict[str, Any]]:
     headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': idempotency_key}
     compressed = None
     if payload is not None:
@@ -79,13 +77,7 @@ def _report_metrics(report: Mapping[str, Any]) -> tuple[dict[str, float], str, s
     return metrics, primary_metric, str(primary_identity['name']), multiplier
 
 
-def _sample(
-    sample_index: int,
-    subset: str,
-    review: Mapping[str, Any],
-    prediction: Mapping[str, Any],
-    metric_name: str,
-) -> tuple[dict[str, Any], bool]:
+def _sample(sample_index, subset, review, prediction, metric_name) -> tuple[dict[str, Any], bool]:
     sample_score = review['sample_score']
     score = sample_score['score']
     output = prediction.get('model_output') or {}
@@ -136,38 +128,45 @@ def _sample(
     }, stop_reason in {'max_tokens', 'model_length'}
 
 
-def _samples(
-    root: Path,
-    model_id: str,
-    benchmark: str,
-    metric_name: str,
-) -> tuple[list[dict[str, Any]], int]:
+def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tuple[list[dict[str, Any]], int, int]:
     prediction_dir = root / 'predictions' / model_id
     review_dir = root / 'reviews' / model_id
     prefix = f'{benchmark}_'
     review_paths = sorted(path for path in review_dir.glob('*.jsonl') if path.name.startswith(prefix))
     samples: list[dict[str, Any]] = []
+    outcome_counts: dict[str, int] = {}
     truncated = 0
+    total = 0
     for review_path in review_paths:
         prediction_path = prediction_dir / review_path.name
         # Concurrent writers may persist predictions and reviews in different orders.
-        prediction_rows = prediction_path.read_text(encoding='utf-8').splitlines()
-        predictions = {int(row['index']): row for row in map(json.loads, filter(str.strip, prediction_rows))}
-        subset = review_path.stem[len(prefix):]
-        review_rows = review_path.read_text(encoding='utf-8').splitlines()
-        for review in map(json.loads, filter(str.strip, review_rows)):
-            sample, is_truncated = _sample(len(samples), subset, review, predictions[int(review['index'])], metric_name)
-            samples.append(sample)
-            truncated += is_truncated
-    return samples, truncated
+        offsets = {}
+        with prediction_path.open('rb') as prediction_rows:
+            while line := prediction_rows.readline():
+                if line.strip():
+                    row = json.loads(line)
+                    offsets[int(row['index'])] = prediction_rows.tell() - len(line)
+            subset = review_path.stem[len(prefix):]
+            with review_path.open('rb') as review_rows:
+                for line in review_rows:
+                    if not line.strip():
+                        continue
+                    review = json.loads(line)
+                    prediction_rows.seek(offsets[int(review['index'])])
+                    prediction = json.loads(prediction_rows.readline())
+                    sample, is_truncated = _sample(len(samples), subset, review, prediction, metric_name)
+                    outcome = sample['answer']['outcome']
+                    total += 1
+                    truncated += is_truncated
+                    # Keep deterministic evidence without uploading the full benchmark.
+                    if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
+                        continue
+                    outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                    samples.append(sample)
+    return samples, truncated, total
 
 
-def _task_identity(
-    benchmark: str,
-    spec: Mapping[str, Any],
-    identity: Mapping[str, Any],
-    metadata: Mapping[str, Any],
-) -> dict[str, Any]:
+def _task_identity(benchmark, spec, identity, metadata) -> dict[str, Any]:
     weight_sha256 = metadata['weight_sha256']
     wkv_mode = metadata['wkv_mode']
     split = spec.get('eval_split')
@@ -200,7 +199,7 @@ def publish_benchmark_callback(
     report_path = root / 'reports' / model_id / f'{benchmark}.json'
     report = json.loads(report_path.read_text(encoding='utf-8'))
     metrics, primary_metric, sample_metric, multiplier = _report_metrics(report)
-    samples, truncated = _samples(root, model_id, benchmark, sample_metric)
+    samples, truncated, total_samples = _samples(root, model_id, benchmark, sample_metric)
     spec = config['resolved_benchmarks'][benchmark]
     evaluation_identity = config['evaluation_identity']['benchmarks'][benchmark]
     task = _task_identity(benchmark, spec, evaluation_identity, metadata)
@@ -229,7 +228,7 @@ def publish_benchmark_callback(
         },
         'coordinates': metadata['comparison']['coordinates'],
         'samples': len(samples),
-        'truncation_rate': truncated / len(samples) if samples else 0.0,
+        'truncation_rate': truncated / total_samples if total_samples else 0.0,
     }
     publication = {
         'schema_version': SCHEMA_VERSION,
@@ -246,6 +245,7 @@ def publish_benchmark_callback(
         'metrics': metrics,
         'diagnostics': {
             'execution_summary': report.get('execution_summary'),
+            'samples_total': total_samples,
             'samples_uploaded': len(samples)
         },
         'samples': samples,
