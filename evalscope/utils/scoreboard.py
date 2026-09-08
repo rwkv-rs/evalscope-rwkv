@@ -6,20 +6,19 @@ import gzip
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Mapping
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import yaml
 
 SCHEMA_VERSION = 'scoreboard-v1'
-MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024, 256 * 1024 * 1024
+MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024, 512 * 1024 * 1024
 MAX_SAMPLES_PER_OUTCOME = 20
 CONTRACT = {
     'producer': 'evalscope',
-    'artifact_schema': 3,
+    'artifact_schema': 4,
     'publication_schema': SCHEMA_VERSION,
     'max_samples_per_outcome': MAX_SAMPLES_PER_OUTCOME,
 }
@@ -34,14 +33,15 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_json(value)).hexdigest()
 
 
-def _send(base_url, token, method, path, idempotency_key, payload) -> tuple[int, dict[str, Any]]:
+def _send(base_url: str, token: str, method: str, path: str, idempotency_key: str,
+          payload: Mapping[str, Any] | None) -> tuple[int, dict[str, Any]]:
     headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': idempotency_key}
     compressed = None
     if payload is not None:
         body = _json(payload)
         compressed = gzip.compress(body)
         if len(body) > MAX_UNCOMPRESSED_BYTES or len(compressed) > MAX_COMPRESSED_BYTES:
-            raise ValueError('Scoreboard publication exceeds the 64 MiB compressed or 256 MiB raw limit')
+            raise ValueError('Scoreboard publication exceeds the 128 MiB compressed or 512 MiB raw limit')
         headers.update({'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
     request = Request(f"{base_url.rstrip('/')}{path}", data=compressed, method=method, headers=headers)
     with urlopen(request, timeout=60) as response:
@@ -61,23 +61,21 @@ def _metric_name(identity: Mapping[str, Any]) -> str:
     return name
 
 
-def _report_metrics(report: Mapping[str, Any]) -> tuple[dict[str, float], str, str, float]:
+def _report_metrics(report: Mapping[str, Any]) -> tuple[dict[str, float], str, str]:
     primary_identity = report['primary_metric_identity']
     primary_metric = _metric_name(primary_identity)
     metrics: dict[str, float] = {}
-    multiplier = 1.0
     for item in report['metrics']:
         score = item.get('score')
         if isinstance(score, (int, float)) and not isinstance(score, bool):
             metrics[_metric_name(item['identity'])] = float(score)
-        if item['identity'] == primary_identity:
-            multiplier = float((item.get('semantics') or {}).get('display_multiplier') or 1.0)
     if primary_metric not in metrics:
         raise ValueError(f'completed report has no finite primary metric: {primary_metric}')
-    return metrics, primary_metric, str(primary_identity['name']), multiplier
+    return metrics, primary_metric, str(primary_identity['name'])
 
 
-def _sample(sample_index, subset, review, prediction, metric_name) -> tuple[dict[str, Any], bool]:
+def _sample(sample_index: int, subset: str, review: Mapping[str, Any], prediction: Mapping[str, Any],
+            metric_name: str) -> tuple[dict[str, Any], bool]:
     sample_score = review['sample_score']
     score = sample_score['score']
     output = prediction.get('model_output') or {}
@@ -85,6 +83,9 @@ def _sample(sample_index, subset, review, prediction, metric_name) -> tuple[dict
     choice = choices[0] if choices else {}
     message = choice.get('message') or {}
     raw_value = message.get('tool_calls') or message.get('content')
+    # A tool-call response can also contain text; preserve both in raw evidence.
+    if message.get('tool_calls') and message.get('content'):
+        raw_value = {'content': message['content'], 'tool_calls': message['tool_calls']}
     raw_completion = _text(score.get('prediction') if raw_value is None else raw_value)
     score_name = score.get('main_score_name') or metric_name
     score_value = (score.get('value') or {}).get(score_name) if score.get('status') == 'success' else None
@@ -128,6 +129,14 @@ def _sample(sample_index, subset, review, prediction, metric_name) -> tuple[dict
     }, stop_reason in {'max_tokens', 'model_length'}
 
 
+def _latest_offsets(rows: BinaryIO) -> dict[int, int]:
+    offsets = {}
+    while line := rows.readline():
+        if line.strip():
+            offsets[int(json.loads(line)['index'])] = rows.tell() - len(line)
+    return offsets
+
+
 def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tuple[list[dict[str, Any]], int, int]:
     prediction_dir = root / 'predictions' / model_id
     review_dir = root / 'reviews' / model_id
@@ -139,43 +148,43 @@ def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tup
     total = 0
     for review_path in review_paths:
         prediction_path = prediction_dir / review_path.name
-        # Concurrent writers may persist predictions and reviews in different orders.
-        offsets = {}
-        with prediction_path.open('rb') as prediction_rows:
-            while line := prediction_rows.readline():
-                if line.strip():
-                    row = json.loads(line)
-                    offsets[int(row['index'])] = prediction_rows.tell() - len(line)
+        # Match unordered writers and keep only the latest retry of each index.
+        with prediction_path.open('rb') as prediction_rows, review_path.open('rb') as review_rows:
+            prediction_offsets = _latest_offsets(prediction_rows)
+            review_offsets = _latest_offsets(review_rows)
             subset = review_path.stem[len(prefix):]
-            with review_path.open('rb') as review_rows:
-                for line in review_rows:
-                    if not line.strip():
-                        continue
-                    review = json.loads(line)
-                    prediction_rows.seek(offsets[int(review['index'])])
-                    prediction = json.loads(prediction_rows.readline())
-                    sample, is_truncated = _sample(len(samples), subset, review, prediction, metric_name)
-                    outcome = sample['answer']['outcome']
-                    total += 1
-                    truncated += is_truncated
-                    # Keep deterministic evidence without uploading the full benchmark.
-                    if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
-                        continue
-                    outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-                    samples.append(sample)
+            for offset in review_offsets.values():
+                review_rows.seek(offset)
+                review = json.loads(review_rows.readline())
+                prediction_rows.seek(prediction_offsets[int(review['index'])])
+                prediction = json.loads(prediction_rows.readline())
+                sample, is_truncated = _sample(len(samples), subset, review, prediction, metric_name)
+                outcome = sample['answer']['outcome']
+                total += 1
+                truncated += is_truncated
+                # Keep deterministic evidence without uploading the full benchmark.
+                if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
+                    continue
+                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                samples.append(sample)
     return samples, truncated, total
 
 
-def _task_identity(benchmark, spec, identity, metadata) -> dict[str, Any]:
+def _task_identity(benchmark: str, spec: Mapping[str, Any], identity: Mapping[str, Any],
+                   metadata: Mapping[str, Any]) -> dict[str, Any]:
     weight_sha256 = metadata['weight_sha256']
     wkv_mode = metadata['wkv_mode']
     split = spec.get('eval_split')
+    field = metadata['benchmark_fields'][benchmark]
+    if not isinstance(field, str) or not field.strip():
+        raise ValueError(f'benchmark_fields[{benchmark!r}] must be a non-empty field name')
     return {
         'identity': f'{weight_sha256}:{wkv_mode}:{benchmark}',
         'weight_sha256': weight_sha256,
         'weight_display_name': metadata['weight_display_name'],
         'wkv_mode': wkv_mode,
         'benchmark': benchmark,
+        'field': field,
         'task_name': benchmark,
         'task_version': str(identity['evaluation_version']),
         'dataset': str(spec.get('dataset_id') or benchmark),
@@ -198,7 +207,7 @@ def publish_benchmark_callback(
     metadata = json.loads(Path(metadata_path).read_text(encoding='utf-8'))
     report_path = root / 'reports' / model_id / f'{benchmark}.json'
     report = json.loads(report_path.read_text(encoding='utf-8'))
-    metrics, primary_metric, sample_metric, multiplier = _report_metrics(report)
+    metrics, primary_metric, sample_metric = _report_metrics(report)
     samples, truncated, total_samples = _samples(root, model_id, benchmark, sample_metric)
     spec = config['resolved_benchmarks'][benchmark]
     evaluation_identity = config['evaluation_identity']['benchmarks'][benchmark]
@@ -208,27 +217,6 @@ def publish_benchmark_callback(
         'limit': config.get('limit'),
         'repeats': config.get('repeats'),
         'seed': config.get('seed')
-    }
-    category_id = f"benchmark_{re.sub(r'[^a-z0-9_]+', '_', benchmark.lower()).strip('_')}"
-    comparison = {
-        'model': metadata['comparison']['model'],
-        'benchmark': {
-            'label': str(report.get('dataset_pretty_name') or benchmark),
-            'categories': [{
-                'id': category_id,
-                'label': str(report.get('dataset_pretty_name') or benchmark)
-            }],
-            'evaluation_method': 'cot' if (spec.get('extra_params') or {}).get('use_cot') else 'direct',
-            'score_multiplier': multiplier,
-        },
-        'evaluation': {
-            'prompt_profile': benchmark,
-            'prompt_template': str(spec.get('prompt_template') or spec.get('query_template') or ''),
-            'precision': metadata['wkv_mode'],
-        },
-        'coordinates': metadata['comparison']['coordinates'],
-        'samples': len(samples),
-        'truncation_rate': truncated / total_samples if total_samples else 0.0,
     }
     publication = {
         'schema_version': SCHEMA_VERSION,
@@ -246,16 +234,19 @@ def publish_benchmark_callback(
         'diagnostics': {
             'execution_summary': report.get('execution_summary'),
             'samples_total': total_samples,
-            'samples_uploaded': len(samples)
+            'samples_uploaded': len(samples),
+            'truncation_rate': truncated / total_samples if total_samples else 0.0,
         },
         'samples': samples,
-        'comparison': comparison,
     }
     campaign = {
         'schema_version': SCHEMA_VERSION,
         'run_key': '',
         'source': 'evalscope',
-        'config_sha256': _sha256(task_config),
+        'config_sha256': _sha256({
+            'task_config': task_config,
+            'sampling_config': publication['sampling_config']
+        }),
         'registry_sha256': _sha256(evaluation_identity),
         'contract_sha256': _sha256(CONTRACT),
         'configured_benchmarks': [benchmark],
