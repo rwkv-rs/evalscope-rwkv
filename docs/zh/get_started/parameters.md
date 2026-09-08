@@ -257,6 +257,7 @@ EvalScope 使用嵌套的 `--sandbox` 配置（对应 `SandboxTaskConfig`）统�
 | `--work-dir` | `str` | 评测输出路径（详见下方目录结构） | `./outputs` |
 | `--no-timestamp` | `bool` | 是否不在工作目录中添加时间戳 | `false` |
 | `--use-cache` | `str` | 复用本地缓存路径（如`outputs/20241210_194434`）<br>重用推理结果和评测结果 | `None` |
+| `--eval-retries` | `int` | 原生 benchmark 执行失败后的额外重试次数；在同一输出目录复用已保存的推理和评分阶段 | `0` |
 | `--rerun-review` | `bool` | 配合 `--use-cache` 使用：基于 predictions 缓存重跑评测/打分，并仅在成功后原子替换 reviews 缓存 | `false` |
 | `--enable-progress-tracker` | `bool` | 是否开启进度追踪，将层级评测进度实时写入`progress.json`，可通过服务接口查询 | `false` |
 | `--collect-perf` | `bool` | 采集每次推理请求的性能指标（延迟、TTFT、Token 用量），汇总后写入评测报告。采集 TTFT 需开启 `--generation-config stream=true`；使用 `--no-collect-perf` 可禁用 | `true` |
@@ -264,6 +265,28 @@ EvalScope 使用嵌套的 `--sandbox` 配置（对应 `SandboxTaskConfig`）统�
 | `--debug` | `bool` | 是否开启调试模式 | `false` |
 | `--ignore-errors` | `bool` | 是否忽略生成过程中的错误 | `false` |
 | `--dry-run` | `bool` | 预检参数，不执行推理，只打印参数 | `false` |
+
+### 并发与自动续跑
+
+原生评测可在原有命令中添加 `--eval-batch-size 16 --eval-retries 3`。
+线程池最多同时处理 16 个样本，任一样本完成后立即补充空闲槽位。
+重试默认关闭；启用后，失败的 benchmark 最多在同一输出目录追加三次尝试，
+等待时间从 5 秒开始递增，上限为 60 秒。已完成的其他 benchmark 不会重跑。
+如果重试耗尽后仍有执行错误，任务会在该 benchmark 的 Scoreboard 上传回调之前失败退出，
+包括通过 `--ignore-errors` 记录的执行错误。
+
+已完成的推理和评分逐条刷新并同步到磁盘。续跑复用成功的阶段：judge 请求失败时，
+不会重复已保存的推理。真实零分和 judge 解析排除不视为传输失败。
+仅修复中断造成的 JSONL 末尾断行，完整记录损坏仍然报错。
+
+进程退出后，使用相同命令并添加 `--use-cache outputs/<运行目录>` 即可复用检查点。
+该选项不会在进程崩溃或机器重启后自动拉起进程。尚未完成的请求和 agent 步骤可能需要重做。
+显式 `--rerun-review` 保留事务行为：重新评分中断后会重新执行评分，之前的评分缓存保持不变。
+同一输出目录只允许一个进程使用；缓存写锁只协调线程，不协调多个进程。
+批量评分适配器生成最终样本评分前，可能将初步 judge 结果保留在内存中；这些中间结果
+不是检查点，中断后可能需要重做。
+随机化数据集续跑时应保持固定的 `--seed`（默认 42）；开启数据集、选项或 few-shot 打乱时，
+自动重试不允许将 seed 设为 `None`。
 
 ### work-dir 目录结构示例
 

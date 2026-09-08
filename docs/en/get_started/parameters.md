@@ -264,6 +264,7 @@ For full usage, examples and Trace visualization, see [Agent Evaluation](../user
 | `--work-dir` | `str` | Evaluation output path (see directory structure below) | `./outputs` |
 | `--no-timestamp` | `bool` | Do not add timestamp to work_dir | `false` |
 | `--use-cache` | `str` | Reuse local cache path (e.g., `outputs/20241210_194434`)<br>Reuses inference and evaluation results | `None` |
+| `--eval-retries` | `int` | Additional native benchmark attempts after execution failures; reuses saved stages in the same output directory | `0` |
 | `--rerun-review` | `bool` | Used with `--use-cache`: re-runs review/scoring from cached predictions and atomically replaces the review cache after success | `false` |
 | `--enable-progress-tracker` | `bool` | Whether to enable progress tracking, writing hierarchical evaluation progress to `progress.json` in real time, queryable via the service API | `false` |
 | `--collect-perf` | `bool` | Collect per-request performance metrics (latency, TTFT, token usage) and write them into the evaluation report. TTFT requires `--generation-config stream=true`. Use `--no-collect-perf` to disable | `true` |
@@ -271,6 +272,31 @@ For full usage, examples and Trace visualization, see [Agent Evaluation](../user
 | `--debug` | `bool` | Whether to enable debug mode | `false` |
 | `--ignore-errors` | `bool` | Whether to ignore errors during generation | `false` |
 | `--dry-run` | `bool` | Dry run to check parameters without executing inference | `false` |
+
+### Concurrency and Automatic Resume
+
+For native evaluation, add `--eval-batch-size 16 --eval-retries 3` to the usual command.
+The pool keeps at most 16 samples active and fills a free slot as soon as a sample finishes.
+Retries are disabled by default; when enabled, a failed benchmark gets up to three additional
+attempts in the same output directory, with backoff starting at 5 seconds and capped at 60 seconds.
+Other completed benchmarks are not rerun. Exhausted execution failures stop the run before
+the benchmark's Scoreboard callback, including failures recorded under `--ignore-errors`.
+
+Completed predictions and reviews are flushed and synced individually. A retry reuses successful
+stages: a failed judge request does not repeat an already saved prediction. Genuine zero scores
+and judge parsing exclusions are not treated as transport failures. Only an interrupted final
+JSONL append is repaired; a malformed complete record still raises an error.
+
+After the process exits, restart the same command with `--use-cache outputs/<run-directory>`
+to reuse these checkpoints. This option does not launch a replacement process after a crash or
+machine reboot. In-flight requests and unfinished agent steps may need to run again. Explicit
+`--rerun-review` keeps its transactional behavior: an interrupted rescoring attempt restarts
+scoring while leaving the previous review cache intact. Use one process per output directory;
+the cache write lock coordinates threads, not separate processes.
+Batch-scoring adapters may retain preliminary judgments in memory until final sample scores
+are available; those preliminary judgments are not checkpoints and may be repeated.
+Keep a fixed `--seed` (default: 42) when resuming randomized datasets; automatic retries
+reject an unset seed if dataset, choice or few-shot shuffling is enabled.
 
 ### work-dir Directory Structure Example
 

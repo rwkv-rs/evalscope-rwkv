@@ -8,7 +8,6 @@ and report generation.
 """
 
 import os
-import threading
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from evalscope.api.dataset import Dataset, Sample
 from evalscope.api.evaluator import CacheManager, Evaluator, TaskState
+from evalscope.api.evaluator.cache import review_needs_retry
 from evalscope.api.judge import summarize_judge_runs
 from evalscope.api.metric import AggScore, SampleScore
 from evalscope.api.registry import register_evaluator
@@ -58,6 +58,9 @@ class _WorkItem:
 
     prediction_persisted: bool = False
     """Whether a newly generated prediction was durably written before review began."""
+
+    review_persisted: bool = False
+    """Whether the worker persisted its review before returning to the coordinator."""
 
     @property
     def needs_predict(self) -> bool:
@@ -150,7 +153,7 @@ class DefaultEvaluator(Evaluator):
 
         # Initialize PerfCollector for collecting per-request performance metrics
         self.perf_collector = PerfCollector()
-        self._prediction_cache_lock = threading.Lock()
+        self.has_retryable_errors = False
         self._sample_scores_by_subset: Dict[str, List[SampleScore]] = {}
         self._execution_tracker = ExecutionTracker()
         self._perf_request_count = 0
@@ -233,7 +236,7 @@ class DefaultEvaluator(Evaluator):
 
             logger.info(f'Benchmark {self.benchmark_name} evaluation finished.')
             return report
-        except Exception:
+        except BaseException:
             self.cache_manager.discard_review_reruns()
             raise
         finally:
@@ -270,6 +273,14 @@ class DefaultEvaluator(Evaluator):
             cached_pred_states, remaining_dataset = (
                 self.cache_manager.filter_prediction_cache(subset, dataset) if self.use_cache else ([], dataset)
             )
+            if self.task_config.collect_perf:
+                for task_state in cached_pred_states:
+                    self._record_perf(task_state)
+            reuse_reviews = self.use_cache and not self.task_config.rerun_review
+            if not reuse_reviews and (
+                self.task_config.rerun_review or os.path.exists(self.cache_manager.get_review_cache_path(subset))
+            ):
+                self.cache_manager.delete_review_cache(subset)
 
             if self.benchmark.use_batch_scoring:
                 # Prediction runs in the pool; review is deferred until all
@@ -277,23 +288,21 @@ class DefaultEvaluator(Evaluator):
                 for sample in remaining_dataset:
                     work_items.append(_WorkItem(subset=subset, sample=sample))
 
-                if self.use_cache and not self.task_config.rerun_review:
+                if reuse_reviews:
                     cached_scores, need_review = self.cache_manager.filter_review_cache(subset, cached_pred_states)
                     cached_scores_by_subset[subset].extend(cached_scores)
                     review_pending_by_subset[subset].extend(need_review)
                 else:
-                    self.cache_manager.delete_review_cache(subset)
                     review_pending_by_subset[subset].extend(cached_pred_states)
 
             else:
                 # Predict + review happen atomically per sample inside the pool.
-                if self.use_cache and not self.task_config.rerun_review:
+                if reuse_reviews:
                     cached_scores, need_review = self.cache_manager.filter_review_cache(subset, cached_pred_states)
                     cached_scores_by_subset[subset].extend(cached_scores)
                     for ts in need_review:  # Tier 2: review-only items
                         work_items.append(_WorkItem(subset=subset, task_state=ts))
                 else:
-                    self.cache_manager.delete_review_cache(subset)
                     for ts in cached_pred_states:  # Prediction cached, review cleared
                         work_items.append(_WorkItem(subset=subset, task_state=ts))
 
@@ -315,9 +324,8 @@ class DefaultEvaluator(Evaluator):
         """
         Phase 2 – execute the unified work pool under a single progress bar.
 
-        Each item is processed by :meth:`_process_work_item`; results are
-        immediately persisted by :meth:`_persist_result` and accumulated
-        into a per-subset bucket for downstream aggregation.
+        Each item is processed and checkpointed by :meth:`_process_work_item`;
+        completed results are accumulated into a per-subset bucket for aggregation.
 
         Args:
             context: Pool context produced by :meth:`_collect_work_items`.
@@ -335,6 +343,9 @@ class DefaultEvaluator(Evaluator):
 
         def on_result(item: _WorkItem, result: Tuple[TaskState, Optional[SampleScore]]) -> None:
             self._persist_result(item, *result)
+            task_state, sample_score = result
+            if task_state.output.error or (sample_score is not None and review_needs_retry(sample_score)):
+                self.has_retryable_errors = True
             results_by_subset[item.subset].append(result)
 
         def on_error(item: _WorkItem, exc: Exception) -> None:
@@ -379,10 +390,13 @@ class DefaultEvaluator(Evaluator):
         if item.needs_predict:
             # A review can fail independently of inference. Persist prediction first so offline
             # re-review never has to regenerate an already completed answer.
-            with self._prediction_cache_lock:
-                self.cache_manager.save_prediction_cache(item.subset, task_state, self.benchmark.save_metadata)
+            self.cache_manager.save_prediction_cache(item.subset, task_state, self.benchmark.save_metadata)
             item.prediction_persisted = True
         sample_score = (None if self.benchmark.use_batch_scoring else self._review_task_state(task_state))
+        if sample_score is not None:
+            # Other futures may fail before the coordinator consumes this result.
+            self.cache_manager.save_review_cache(item.subset, task_state, sample_score, self.benchmark.save_metadata)
+            item.review_persisted = True
         return task_state, sample_score
 
     def _persist_result(
@@ -392,11 +406,10 @@ class DefaultEvaluator(Evaluator):
         sample_score: Optional[SampleScore],
     ) -> None:
         """
-        Persist a completed item’s results to the on-disk cache.
+        Collect performance and persist results not already checkpointed by the worker.
 
-        Called in the **main thread** by :meth:`_run_pool` immediately after
-        each item completes (no concurrent writes).  Override to add custom
-        persistence logic.
+        Called in the **main thread** by :meth:`_run_pool` after each item completes.
+        CacheManager serializes writes shared with workers. Override to add custom persistence logic.
 
         Args:
             item: The originating work item.
@@ -409,7 +422,7 @@ class DefaultEvaluator(Evaluator):
             )
             logger.debug(f'Model result: \n{model_result.pretty_print()}')
 
-        if sample_score is not None:
+        if sample_score is not None and not item.review_persisted:
             review_result = self.cache_manager.save_review_cache(
                 subset=item.subset,
                 task_state=task_state,
@@ -494,6 +507,8 @@ class DefaultEvaluator(Evaluator):
                 logger.info(f'No valid scores generated for subset: {subset}, skipping.')
                 continue
 
+            if any(review_needs_retry(score) for score in all_scores):
+                self.has_retryable_errors = True
             logger.info(f'Aggregating scores for subset: {subset}')
             self._sample_scores_by_subset[subset] = all_scores
             agg_score_dict[subset] = self.benchmark.aggregate_scores(sample_scores=all_scores)
@@ -613,5 +628,7 @@ class DefaultEvaluator(Evaluator):
         return report
 
     def finalize(self, *args, **kwargs):
-        self.benchmark.finalize(*args, **kwargs)
-        self.cache_manager.close()
+        try:
+            self.benchmark.finalize(*args, **kwargs)
+        finally:
+            self.cache_manager.close()
