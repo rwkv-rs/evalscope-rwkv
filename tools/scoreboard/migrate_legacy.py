@@ -18,12 +18,16 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 SCHEMA_VERSION = 'scoreboard-v1'
+MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_SAMPLES_PER_OUTCOME = 20
 
 MIGRATION_CONTRACT = {
     'name': 'legacy-evalscope-scoreboard',
     'source': 'postgresql-read-only',
     'target': 'scoreboard-v1-http',
-    'version': 1,
+    'version': 3,
+    'max_samples_per_outcome': MAX_SAMPLES_PER_OUTCOME,
 }
 
 SOURCE_QUERY = r'''
@@ -31,27 +35,13 @@ BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 COPY (
     SELECT payload
     FROM (
-        SELECT 0 AS kind_order, model_id AS task_order, 0 AS sample_order,
-               jsonb_build_object(
-                   'kind', 'model',
-                   'model_id', model_id,
-                   'model_name', model_name,
-                   'arch_version', arch_version,
-                   'data_version', data_version,
-                   'num_params', num_params
-               ) AS payload
-        FROM model
-        UNION ALL
-        SELECT 1, t.task_id, 0,
+        SELECT 1 AS kind_order, t.task_id AS task_order, 0 AS sample_order,
                jsonb_build_object(
                    'kind', 'task',
                    'task_id', t.task_id,
                    'score_id', s.score_id,
                    'model_id', m.model_id,
                    'model_name', m.model_name,
-                   'arch_version', m.arch_version,
-                   'data_version', m.data_version,
-                   'num_params', m.num_params,
                    'benchmark_id', b.benchmark_id,
                    'benchmark_name', b.benchmark_name,
                    'benchmark_split', b.benchmark_split,
@@ -66,7 +56,7 @@ COPY (
                    'cot_mode', s.cot_mode,
                    'metrics', s.metrics,
                    'score_created_at', s.created_at
-               )
+               ) AS payload
         FROM task t
         JOIN scores s USING (task_id)
         JOIN model m USING (model_id)
@@ -85,13 +75,7 @@ COPY (
                    'repeat_index', c.avg_repeat_index,
                    'pass_index', c.pass_index,
                    'completion_status', c.status,
-                   'messages', (
-                       SELECT coalesce(jsonb_agg(entry.value ORDER BY entry.ordinality), '[]'::jsonb)
-                       FROM jsonb_array_elements(
-                           coalesce(c.context #> '{agent_result,review,messages}', '[]'::jsonb)
-                       ) WITH ORDINALITY AS entry(value, ordinality)
-                       WHERE entry.value ->> 'role' IS DISTINCT FROM 'assistant'
-                   ),
+                   'messages', c.context #> '{agent_result,review,messages}',
                    'sample_score', jsonb_build_object(
                        'group_id', c.context #> '{agent_result,review,sample_score,group_id}',
                        'score', jsonb_build_object(
@@ -180,11 +164,15 @@ def send(
 ) -> tuple[int, dict[str, Any]]:
     body = canonical_json(payload) if payload is not None else None
     headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': idempotency_key}
+    compressed = None
     if body is not None:
+        compressed = gzip.compress(body)
+        if len(body) > MAX_UNCOMPRESSED_BYTES or len(compressed) > MAX_COMPRESSED_BYTES:
+            raise ValueError('Scoreboard publication exceeds the 128 MiB compressed or 512 MiB raw limit')
         headers.update({'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
     request = Request(
         f"{base_url.rstrip('/')}{path}",
-        data=gzip.compress(body) if body is not None else None,
+        data=compressed,
         method=method,
         headers=headers,
     )
@@ -325,59 +313,6 @@ def load_model_mappings(path: Path) -> dict[str, dict[str, str]]:
     return mappings
 
 
-def _normalized_parameters(value: Any) -> str:
-    return str(value).replace('_', '.').upper()
-
-
-def _model_variant(model: Mapping[str, Any]) -> dict[str, str]:
-    return {
-        'label': str(model['model_name']),
-        'architecture': str(model['arch_version']).upper(),
-        'generation': str(model['data_version']).upper(),
-        'parameters': _normalized_parameters(model['num_params']),
-    }
-
-
-def _comparison_coordinate(
-    task: Mapping[str, Any],
-    models: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, Any], dict[str, str]] | None:
-    parameters = _normalized_parameters(task['num_params'])
-    candidates = {(str(model['data_version']), str(model['model_name'])): model
-                  for model in models
-                  if str(model['arch_version']) == str(task['arch_version'])
-                  and _normalized_parameters(model['num_params']) == parameters}
-    generations = sorted({generation for generation, _ in candidates})
-    if len(generations) < 2 or str(task['data_version']) not in generations[-2:]:
-        return None
-    a_generation, b_generation = generations[-2:]
-    a_model = next(model for (generation, _), model in candidates.items() if generation == a_generation)
-    b_model = next(model for (generation, _), model in candidates.items() if generation == b_generation)
-    selected_arm = 'a' if str(task['data_version']) == a_generation else 'b'
-    selected_model = a_model if selected_arm == 'a' else b_model
-    group_id = re.sub(r'[^a-z0-9_.-]+', '_', parameters.lower())
-    coordinate = {
-        'comparison': {
-            'id': 'generation',
-            'label': f'{a_generation.upper()} vs {b_generation.upper()}',
-            'short_label': 'Generation',
-            'a_label': a_generation.upper(),
-            'b_label': b_generation.upper(),
-            'contract': 'The legacy scoreboard pairs the latest two model data versions at the same parameter size.',
-        },
-        'parameter_group': {
-            'id': group_id,
-            'label': parameters,
-            'a_model': _model_variant(a_model),
-            'b_model': _model_variant(b_model),
-            'parameter_delta_percent': 0.0,
-            'comparable': True,
-        },
-        'arm': selected_arm,
-    }
-    return coordinate, _model_variant(selected_model)
-
-
 def _text(value: Any) -> str:
     if value is None:
         return ''
@@ -392,7 +327,8 @@ def _output_fields(row: Mapping[str, Any]) -> tuple[str, str, int, float | None,
     choice = choices[0] if choices else {}
     message = choice.get('message') or {}
     score = (row.get('sample_score') or {}).get('score') or {}
-    raw_completion = _text(score.get('prediction') or row.get('answer') or message.get('content'))
+    raw_value = message.get('tool_calls') or message.get('content')
+    raw_completion = _text((score.get('prediction') or row.get('answer')) if raw_value is None else raw_value)
     stop_reason = str(choice.get('stop_reason') or (row.get('context_audit') or {}).get('finish_reason') or 'unknown')
     usage = output.get('usage') or {}
     perf = message.get('perf_metrics') or {}
@@ -405,10 +341,11 @@ def _output_fields(row: Mapping[str, Any]) -> tuple[str, str, int, float | None,
 def _sample(
     sample_index: int,
     row: Mapping[str, Any],
-    include_answer: bool,
-) -> tuple[dict[str, Any], bool]:
-    messages = row.get('messages') or []
-    prompt_messages = [message for message in messages if message.get('role') != 'assistant']
+) -> tuple[dict[str, Any], bool, str]:
+    prompt_messages = list(row.get('messages') or [])
+    # Keep assistant/tool history; only the final generated answer is not input.
+    if prompt_messages and prompt_messages[-1].get('role') == 'assistant':
+        prompt_messages = prompt_messages[:-1]
     sample_score = row.get('sample_score') or {}
     score = sample_score.get('score') or {}
     score_values = score.get('value') or {}
@@ -422,21 +359,19 @@ def _sample(
         outcome = 'unanswered'
     else:
         outcome = 'incorrect'
-    answer = None
-    if include_answer:
-        group_id = sample_score.get('group_id')
-        answer = {
-            'outcome': outcome,
-            'problem_id': str(group_id if group_id is not None else row['sample_index']),
-            'repeat_id': int(row['repeat_index']),
-            'ground_truth': _text(row.get('reference_answer') or score.get('target')),
-            'extracted_answer': _text(score.get('extracted_prediction') or row.get('answer')),
-            'assembled_prompt': canonical_json(prompt_messages).decode('utf-8'),
-            'raw_completion': raw_completion,
-            'fail_reason': _text(row.get('fail_reason')).strip() or None,
-            'generated_tokens': generated_tokens,
-            'latency_ms': latency_ms,
-        }
+    group_id = sample_score.get('group_id')
+    answer = {
+        'outcome': outcome,
+        'problem_id': str(group_id if group_id is not None else row['sample_index']),
+        'repeat_id': int(row['repeat_index']),
+        'ground_truth': _text(row.get('reference_answer') or score.get('target')),
+        'extracted_answer': _text(score.get('extracted_prediction') or row.get('answer')),
+        'assembled_prompt': canonical_json(prompt_messages).decode('utf-8'),
+        'raw_completion': raw_completion,
+        'fail_reason': _text(row.get('fail_reason')).strip()[:2000] or None,
+        'generated_tokens': generated_tokens,
+        'latency_ms': latency_ms,
+    }
     sample = {
         'sample_index': sample_index,
         'document_index': int(row['sample_index']),
@@ -458,20 +393,10 @@ def _sample(
         },
         'answer': answer,
     }
-    return sample, stop_reason in {'max_tokens', 'model_length'}
+    return sample, stop_reason in {'max_tokens', 'model_length'}, outcome
 
 
-def _scalar_metrics(value: Any) -> dict[str, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {
-        str(name): float(metric)
-        for name, metric in value.items()
-        if not isinstance(metric, bool) and isinstance(metric, (int, float)) and math.isfinite(float(metric))
-    }
-
-
-def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
+def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str], field: str) -> dict[str, Any]:
     benchmark = str(task['benchmark_name'])
     split = str(task.get('benchmark_split') or '')
     task_name = f"{benchmark}#{task['task_id']}"
@@ -481,6 +406,7 @@ def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[
         'weight_display_name': mapping['weight_display_name'],
         'wkv_mode': mapping['wkv_mode'],
         'benchmark': benchmark,
+        'field': field,
         'task_name': task_name,
         'task_version': str(task['task_id']),
         'dataset': benchmark,
@@ -494,51 +420,31 @@ def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[
 def _task_publication(
     task: Mapping[str, Any],
     rows: Iterable[Mapping[str, Any]],
-    models: Sequence[Mapping[str, Any]],
     mapping: Mapping[str, str],
+    field: str,
 ) -> dict[str, Any]:
-    benchmark = str(task['benchmark_name'])
-    coordinate = _comparison_coordinate(task, models)
     samples = []
+    outcome_counts: dict[str, int] = {}
     truncated = 0
     evaluated = 0
+    total = 0
     for row in rows:
-        sample, is_truncated = _sample(len(samples), row, coordinate is not None)
-        samples.append(sample)
+        sample, is_truncated, outcome = _sample(len(samples), row)
+        total += 1
         truncated += is_truncated
         evaluated += row.get('eval_id') is not None
-    metrics = _scalar_metrics(task['metrics'])
-    primary_metric = 'score' if 'score' in metrics else sorted(metrics)[0]
-    comparison = None
-    if coordinate is not None:
-        comparison_value, selected_model = coordinate
-        comparison = {
-            'model': selected_model,
-            'benchmark': {
-                'label': benchmark,
-                'categories': [{
-                    'id': 'function_call',
-                    'label': 'Function Call'
-                }],
-                'evaluation_method': str(task['cot_mode']).lower(),
-                'score_multiplier': 100.0,
-            },
-            'evaluation': {
-                'prompt_profile': 'legacy-evalscope',
-                'prompt_template': '',
-                'precision': mapping['wkv_mode'],
-            },
-            'coordinates': [comparison_value],
-            'samples': len(samples),
-            'truncation_rate': truncated / len(samples) if samples else 0.0,
-        }
+        if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
+            continue
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        samples.append(sample)
+    # Legacy EvalScope stores its avg@1 result under the generic top-level
+    # ``score`` key. Publish the aggregation name expected by the Scoreboard.
+    metrics = {'avg@1': float(task['metrics']['score'])}
     return {
         'schema_version': SCHEMA_VERSION,
-        'task': _task_identity(task, mapping),
+        'task': _task_identity(task, mapping, field),
         'result_files': [],
         'task_config': {
-            'old_task_id': int(task['task_id']),
-            'old_score_id': int(task['score_id']),
             'evaluator': task['evaluator'],
             'cot_mode': task['cot_mode'],
             'config_path': task.get('config_path'),
@@ -548,32 +454,34 @@ def _task_publication(
             'framework': 'evalscope'
         },
         'sampling_config': task.get('sampling_config') or {},
-        'primary_metric': primary_metric,
+        'primary_metric': 'avg@1',
         'metrics': metrics,
         'diagnostics': {
+            'old_task_id': int(task['task_id']),
+            'old_score_id': int(task['score_id']),
             'legacy_metrics': task['metrics'],
+            'samples_total': total,
+            'truncation_rate': truncated / total if total else 0.0,
             'source_counts': {
-                'completions': len(samples),
+                'completions': total,
                 'evaluated': evaluated,
+                'uploaded': len(samples),
             },
         },
         'samples': samples,
-        'comparison': comparison,
     }
 
 
 def build_migration_bundle(
     source_rows: Iterable[Mapping[str, Any]],
     mappings: Mapping[str, Mapping[str, str]],
+    benchmark_fields: Mapping[str, str],
 ) -> tuple[dict[str, Any], Iterable[dict[str, Any]]]:
     rows = iter(source_rows)
-    models: list[Mapping[str, Any]] = []
     tasks: list[Mapping[str, Any]] = []
     first_sample: Mapping[str, Any] | None = None
     for row in rows:
-        if row['kind'] == 'model':
-            models.append(row)
-        elif row['kind'] == 'task':
+        if row['kind'] == 'task':
             tasks.append(row)
         elif row['kind'] == 'sample':
             first_sample = row
@@ -583,6 +491,10 @@ def build_migration_bundle(
     missing = sorted({str(task['model_name']) for task in tasks} - set(mappings))
     if missing:
         raise ValueError(f"model map is missing: {', '.join(missing)}")
+    for benchmark in {str(task['benchmark_name']) for task in tasks}:
+        field = benchmark_fields.get(benchmark)
+        if not isinstance(field, str) or re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', field) is None:
+            raise ValueError(f'benchmark field map requires a valid field slug for {benchmark!r}')
     task_by_id = {int(task['task_id']): task for task in tasks}
 
     def publications() -> Iterable[dict[str, Any]]:
@@ -594,14 +506,16 @@ def build_migration_bundle(
             publication = _task_publication(
                 task,
                 task_rows,
-                models,
                 mappings[str(task['model_name'])],
+                benchmark_fields[str(task['benchmark_name'])],
             )
             yield publication
             del publication
         for task_id, task in task_by_id.items():
             if task_id not in published:
-                yield _task_publication(task, [], models, mappings[str(task['model_name'])])
+                yield _task_publication(
+                    task, [], mappings[str(task['model_name'])], benchmark_fields[str(task['benchmark_name'])]
+                )
 
     benchmarks = sorted({str(task['benchmark_name']) for task in tasks})
     campaign = {
@@ -624,7 +538,10 @@ def build_migration_bundle(
         'configured_benchmarks': benchmarks,
         'resolved_benchmarks': benchmarks,
         'skipped_benchmarks': [],
-        'expected_tasks': [_task_identity(task, mappings[str(task['model_name'])]) for task in tasks],
+        'expected_tasks': [
+            _task_identity(task, mappings[str(task['model_name'])], benchmark_fields[str(task['benchmark_name'])])
+            for task in tasks
+        ],
         'rerun_reason': None,
     }
     campaign['run_key'] = campaign_run_key(campaign)
@@ -635,20 +552,22 @@ def build_migration_bundle(
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model-map', type=Path, required=True)
+    parser.add_argument(
+        '--benchmark-fields', type=Path, required=True, help='JSON object mapping benchmark to field slug'
+    )
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
-    campaign, tasks = build_migration_bundle(read_source_rows(), load_model_mappings(args.model_map))
+    benchmark_fields = json.loads(args.benchmark_fields.read_text(encoding='utf-8'))
+    campaign, tasks = build_migration_bundle(read_source_rows(), load_model_mappings(args.model_map), benchmark_fields)
     if args.dry_run:
         task_count = 0
         sample_count = 0
-        comparison_count = 0
         uncompressed_bytes = 0
         largest_task_bytes = 0
         for task in tasks:
             task_bytes = len(canonical_json(task))
             task_count += 1
             sample_count += len(task['samples'])
-            comparison_count += task['comparison'] is not None
             uncompressed_bytes += task_bytes
             largest_task_bytes = max(largest_task_bytes, task_bytes)
             task = None
@@ -656,7 +575,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             'run_key': campaign['run_key'],
             'tasks': task_count,
             'samples': sample_count,
-            'comparison_tasks': comparison_count,
             'uncompressed_bytes': uncompressed_bytes,
             'largest_task_bytes': largest_task_bytes,
         }
