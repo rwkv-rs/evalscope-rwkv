@@ -88,6 +88,10 @@ def add_argument(parser: argparse.ArgumentParser):
     parser.add_argument('--repeats', type=int, default=1, help='Number of times to repeat the dataset items for k-metrics.')  # noqa: E501
 
     # Cache and working directory arguments
+    parser.add_argument(
+        '--eval-retries', type=int, default=None,
+        help='Additional native benchmark attempts after failures; resumes saved sample stages. Default: 0.'
+    )
     parser.add_argument('--use-cache', type=str, help='Path to a previous output directory (e.g. outputs/20260519_120000) to resume from. Reuses cached predictions and reviews matched by sample_id.')  # noqa: E501
     parser.add_argument('--rerun-review', action='store_true', default=False, help='When --use-cache is set, force re-running the review/scoring step (deletes existing reviews cache) while still reusing prediction cache.')  # noqa: E501
     parser.add_argument('--work-dir', type=str, help='The root cache dir.')
@@ -108,6 +112,7 @@ def add_argument(parser: argparse.ArgumentParser):
     parser.add_argument('--judge-strategy', type=str, default=None, help='[Deprecated] Use --judge JSON instead.')
     parser.add_argument('--judge-model-args', type=json.loads, default=None, help='[Deprecated] Use --judge JSON instead.')
     parser.add_argument('--analysis-report', action='store_true', default=False, help='Generate analysis report for the evaluation results using judge model.')  # noqa: E501
+    parser.add_argument('--html-report', action=argparse.BooleanOptionalAction, default=True, help='Generate the standalone interactive HTML report. Use --no-html-report to disable it.')  # noqa: E501
     parser.add_argument('--collect-perf', action=argparse.BooleanOptionalAction, default=True, help='Collect per-request performance metrics (latency, TTFT, token usage) during evaluation. TTFT requires streaming (--generation-config stream=True). Use --no-collect-perf to disable.')  # noqa: E501
 
     # Agent-config (native AgentLoop or external-agent bridge, distinguished

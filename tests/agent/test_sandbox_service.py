@@ -363,14 +363,59 @@ class TestSandboxServiceCache:
                     patch('evalscope.api.sandbox.service.get_enclave_types',
                           return_value=('sandbox-type', None, None, None)):
                 first, second = await asyncio.gather(
-                    service.acquire_pool(SandboxEngine.DOCKER, 1, object()),
-                    service.acquire_pool(SandboxEngine.DOCKER, 1, object()),
+                    service.acquire_pool(SandboxEngine.DOCKER, 1, {'image': 'python:3.11-slim'}),
+                    service.acquire_pool(SandboxEngine.DOCKER, 1, {'image': 'python:3.11-slim'}),
                 )
                 assert first.manager is manager
                 assert second.manager is manager
 
         asyncio.run(_run())
         assert manager.initialize_calls == 1
+
+    def test_different_pool_images_use_different_managers(self, service):
+        managers = []
+
+        class PoolManager:
+
+            def __init__(self):
+                self._pool_initialized = False
+                self.pool_config = None
+                managers.append(self)
+
+            async def start(self):
+                return None
+
+            async def initialize_pool(self, **kwargs):
+                self._pool_initialized = True
+                self.pool_config = kwargs['config']
+                return ['sandbox-1']
+
+            async def stop(self):
+                return None
+
+        async def _run():
+            with patch.object(service, '_construct_manager', side_effect=lambda *args, **kwargs: PoolManager()), \
+                    patch('evalscope.api.sandbox.service.get_enclave_types',
+                          return_value=('sandbox-type', None, None, None)):
+                python = await service.acquire_pool(
+                    SandboxEngine.DOCKER, 8, {'image': 'python:3.11-slim'}
+                )
+                numpy = await service.acquire_pool(
+                    SandboxEngine.DOCKER, 8, {'image': 'python:3.11-numpy'}
+                )
+                python_again = await service.acquire_pool(
+                    SandboxEngine.DOCKER, 8, {'image': 'python:3.11-slim'}
+                )
+
+                assert python.manager is not numpy.manager
+                assert python_again.manager is python.manager
+
+        asyncio.run(_run())
+        assert len(managers) == 2
+        assert [manager.pool_config['image'] for manager in managers] == [
+            'python:3.11-slim',
+            'python:3.11-numpy',
+        ]
 
     def test_shutdown_cleans_partially_started_manager(self, service):
         start_entered = threading.Event()

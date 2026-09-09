@@ -267,7 +267,7 @@ class TaskConfig(BaseArgument):
     limit: Optional[Union[int, float]] = None
     """Maximum number of samples to evaluate. Can be int (count) or float (fraction)."""
 
-    eval_batch_size: int = 1
+    eval_batch_size: int = Field(default=1, ge=1)
     """Batch size / concurrency for evaluation, applied across all stages:
     - Inference: concurrent requests (openai_api mode) or batch size (llm_ckpt mode).
     - LLM-judge review (BatchReviewer Pass 1): number of concurrent threads.
@@ -278,6 +278,10 @@ class TaskConfig(BaseArgument):
     """
 
     # Cache and working directory arguments
+    eval_retries: int = Field(default=0, ge=0)
+    """Additional native benchmark attempts after execution failures. Each retry
+    reuses completed predictions and reviews in the same output directory."""
+
     use_cache: Optional[str] = None
     """Path to a previous output directory (e.g. 'outputs/20260519_120000') to resume from.
     Reuses cached predictions and reviews matched by sample_id; set None to start fresh."""
@@ -331,6 +335,9 @@ class TaskConfig(BaseArgument):
 
     analysis_report: bool = False
     """Whether to generate detailed analysis reports after evaluation."""
+
+    html_report: bool = True
+    """Whether to generate the standalone interactive HTML report after evaluation."""
 
     collect_perf: bool = True
     """Whether to collect per-request performance metrics (latency, TTFT, token usage)

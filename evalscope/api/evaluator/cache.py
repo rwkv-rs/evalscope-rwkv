@@ -1,5 +1,7 @@
 import copy
+import json
 import os
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,12 +12,23 @@ from evalscope.api.dataset import Dataset
 from evalscope.api.messages import ChatMessage, messages_pretty_str, messages_to_markdown
 from evalscope.api.metric import SampleScore
 from evalscope.api.model import ModelOutput
-from evalscope.utils.io_utils import JsonlWriter, OutputsStructure, convert_normal_types, jsonl_to_list
+from evalscope.constants import ScoreStatus
+from evalscope.utils.io_utils import JsonlWriter, OutputsStructure, convert_normal_types
 from evalscope.utils.logger import get_logger
 
 from .state import TaskState
 
 logger = get_logger()
+
+
+def review_needs_retry(sample_score: SampleScore) -> bool:
+    """Retry unavailable transport results, never real zeroes or rejected judge replies."""
+    score = sample_score.score
+    if score.status.is_usable:
+        return False
+    return score.status is ScoreStatus.TRANSPORT_ERROR or bool(
+        score.judge_summary and score.judge_summary.failures.get(ScoreStatus.TRANSPORT_ERROR.value, 0)
+    )
 
 
 class CacheManager:
@@ -46,6 +59,7 @@ class CacheManager:
         self.benchmark_name = benchmark_name
         self._writers: Dict[str, JsonlWriter] = {}
         self._review_reruns: Dict[str, str] = {}
+        self._write_lock = threading.RLock()
 
     def _get_writer(self, cache_file: str) -> JsonlWriter:
         """Return a persistent writer for *cache_file*, opening on first use.
@@ -56,14 +70,41 @@ class CacheManager:
         """
         cache_file = os.path.expanduser(cache_file)
         if cache_file not in self._writers:
-            self._writers[cache_file] = JsonlWriter(cache_file)
+            self._writers[cache_file] = JsonlWriter(cache_file, durable=True)
         return self._writers[cache_file]
+
+    def _read_cache(self, cache_file: str) -> List[Dict[str, Any]]:
+        """Recover only an interrupted final append; malformed complete records still fail."""
+        records = []
+        with self._write_lock, open(cache_file, 'rb+') as stream:
+            while line := stream.readline():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    if line.endswith(b'\n'):
+                        raise
+                    stream.seek(-len(line), os.SEEK_CUR)
+                    stream.truncate()
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    logger.warning(f'Removed interrupted final cache record from {cache_file}.')
+                    break
+                records.append(record)
+                if not line.endswith(b'\n'):
+                    # A complete JSON value without its delimiter must not merge with the next append.
+                    stream.write(b'\n')
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        return records
 
     def close(self) -> None:
         """Close all open writers. Idempotent — safe to call multiple times."""
-        for writer in self._writers.values():
-            writer.close()
-        self._writers.clear()
+        with self._write_lock:
+            for writer in self._writers.values():
+                writer.close()
+            self._writers.clear()
 
     def __del__(self) -> None:
         """Best-effort cleanup if :meth:`close` was not called explicitly."""
@@ -94,12 +135,14 @@ class CacheManager:
 
         cached_task_states = []
         cached_sample_ids = set()
-        cache_items = jsonl_to_list(cache_file)
+        cache_items = {item['index']: item for item in self._read_cache(cache_file)}
 
         # Process each cached item
-        for cache_item in cache_items:
+        for cache_item in cache_items.values():
             # Deserialize the cached model result
             cached_model_result = ModelResult.model_validate(cache_item)
+            if cached_model_result.model_output is None or cached_model_result.model_output.error:
+                continue
             # Convert to task state for further processing
             cached_state = cached_model_result.to_task_state(dataset=dataset)
 
@@ -149,7 +192,8 @@ class CacheManager:
         model_result = ModelResult.from_task_state(task_state, save_metadata)
         # Serialize to dictionary, convert non-JSON types (numpy, datetime), append.
         model_result_dict = convert_normal_types(model_result.model_dump())
-        self._get_writer(cache_file).write(model_result_dict)
+        with self._write_lock:
+            self._get_writer(cache_file).write(model_result_dict)
         return model_result
 
     def filter_review_cache(self, subset: str,
@@ -173,13 +217,16 @@ class CacheManager:
             return [], task_states
 
         cached_sample_scores: List[SampleScore] = []
-        cache_items = jsonl_to_list(cache_file)
+        cache_items = {item['index']: item for item in self._read_cache(cache_file)}
+        prediction_ids = {state.sample_id for state in task_states}
 
         # Process each cached review result
-        for cache_item in cache_items:
+        for cache_item in cache_items.values():
             # Deserialize the cached review result
             cached_review_result = ReviewResult.from_cache_item(cache_item)
-            cached_sample_scores.append(cached_review_result.to_sample_score())
+            score = cached_review_result.to_sample_score()
+            if cached_review_result.index in prediction_ids and not review_needs_retry(score):
+                cached_sample_scores.append(score)
 
         # Filter out task states that already have review scores
         cached_sample_ids = {review.sample_id for review in cached_sample_scores}
@@ -256,7 +303,8 @@ class CacheManager:
         review_result = ReviewResult.from_score_state(sample_score, task_state, save_metadata)
         # Serialize to dictionary, convert non-JSON types (numpy, datetime), append.
         review_result_dict = convert_normal_types(review_result.model_dump())
-        self._get_writer(cache_file).write(review_result_dict)
+        with self._write_lock:
+            self._get_writer(cache_file).write(review_result_dict)
         return review_result
 
     def get_report_path(self) -> str:

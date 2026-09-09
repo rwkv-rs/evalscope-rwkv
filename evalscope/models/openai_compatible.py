@@ -30,6 +30,15 @@ from .utils.openai import (
 logger = get_logger()
 
 
+def _normalize_output_limit_stop_reason(output: ModelOutput, config: GenerateConfig) -> None:
+    """Repair providers that report ``stop`` after consuming ``max_tokens`` exactly."""
+    if config.max_tokens is None or output.usage is None or not output.choices:
+        return
+    if output.stop_reason != 'stop' or output.usage.output_tokens < config.max_tokens:
+        return
+    output.choices[0].stop_reason = 'max_tokens'
+
+
 class OpenAICompatibleAPI(ModelAPI):
 
     def __init__(
@@ -146,6 +155,7 @@ class OpenAICompatibleAPI(ModelAPI):
             # return output and call
             choices = self.chat_choices_from_completion(completion, tools)
             output = model_output_from_openai(completion, choices)
+            _normalize_output_limit_stop_reason(output, config)
 
             # Populate timing fields
             output.time = total_time
@@ -224,6 +234,7 @@ class OpenAICompatibleAPI(ModelAPI):
             # Return output
             choices = self.chat_choices_from_completion(completion, tools)
             output = model_output_from_openai(completion, choices)
+            _normalize_output_limit_stop_reason(output, config)
 
             output.time = total_time
             usage = output.usage
