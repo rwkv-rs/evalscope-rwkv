@@ -260,6 +260,7 @@ EvalScope 使用嵌套的 `--sandbox` 配置（对应 `SandboxTaskConfig`）统�
 | `--eval-retries` | `int` | 原生 benchmark 执行失败后的额外重试次数；在同一输出目录复用已保存的推理和评分阶段 | `0` |
 | `--rerun-review` | `bool` | 配合 `--use-cache` 使用：基于 predictions 缓存重跑评测/打分，并仅在成功后原子替换 reviews 缓存 | `false` |
 | `--enable-progress-tracker` | `bool` | 是否开启进度追踪，将层级评测进度实时写入`progress.json`，可通过服务接口查询 | `false` |
+| `--html-report` | `bool` | 是否生成独立交互式 HTML 报告；使用 `--no-html-report` 时仅保留 JSON/JSONL 报告 | `true` |
 | `--collect-perf` | `bool` | 采集每次推理请求的性能指标（延迟、TTFT、Token 用量），汇总后写入评测报告。采集 TTFT 需开启 `--generation-config stream=true`；使用 `--no-collect-perf` 可禁用 | `true` |
 | `--seed` | `int` | 随机种子 | `42` |
 | `--debug` | `bool` | 是否开启调试模式 | `false` |

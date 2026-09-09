@@ -336,6 +336,9 @@ class TaskConfig(BaseArgument):
     analysis_report: bool = False
     """Whether to generate detailed analysis reports after evaluation."""
 
+    html_report: bool = True
+    """Whether to generate the standalone interactive HTML report after evaluation."""
+
     collect_perf: bool = True
     """Whether to collect per-request performance metrics (latency, TTFT, token usage)
     during evaluation. TTFT requires streaming (set `generation_config.stream=True`)."""

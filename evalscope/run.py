@@ -287,11 +287,14 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
         logger.error('Failed to generate perf table.')
 
     # Generate interactive HTML report
-    try:
-        html_path = gen_html_report_file(outputs.reports_dir)
-        logger.info(f'HTML report generated: {html_path}')
-    except Exception as e:
-        logger.error(f'Failed to generate HTML report: {e}')
+    if task_config.html_report:
+        try:
+            html_path = gen_html_report_file(outputs.reports_dir)
+            logger.info(f'HTML report generated: {html_path}')
+        except Exception as e:
+            logger.error(f'Failed to generate HTML report: {e}')
+    else:
+        logger.info('Standalone HTML report generation disabled.')
     # Clean up
     if model is not None:
         import gc

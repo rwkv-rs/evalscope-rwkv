@@ -112,6 +112,7 @@ def add_argument(parser: argparse.ArgumentParser):
     parser.add_argument('--judge-strategy', type=str, default=None, help='[Deprecated] Use --judge JSON instead.')
     parser.add_argument('--judge-model-args', type=json.loads, default=None, help='[Deprecated] Use --judge JSON instead.')
     parser.add_argument('--analysis-report', action='store_true', default=False, help='Generate analysis report for the evaluation results using judge model.')  # noqa: E501
+    parser.add_argument('--html-report', action=argparse.BooleanOptionalAction, default=True, help='Generate the standalone interactive HTML report. Use --no-html-report to disable it.')  # noqa: E501
     parser.add_argument('--collect-perf', action=argparse.BooleanOptionalAction, default=True, help='Collect per-request performance metrics (latency, TTFT, token usage) during evaluation. TTFT requires streaming (--generation-config stream=True). Use --no-collect-perf to disable.')  # noqa: E501
 
     # Agent-config (native AgentLoop or external-agent bridge, distinguished
