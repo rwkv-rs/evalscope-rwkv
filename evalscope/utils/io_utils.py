@@ -258,6 +258,7 @@ class JsonlWriter:
     appends a newline, and flushes the Python buffer so data reaches the
     OS page cache immediately — readable by other processes and
     recoverable after a Python-level crash.
+    Set ``durable=True`` for checkpoints that must call ``fsync`` before returning.
 
     Example::
 
@@ -266,9 +267,10 @@ class JsonlWriter:
         writer.close()
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, durable: bool = False) -> None:
         self._path = path
         self._file: Optional[IO[str]] = None
+        self._durable = durable
 
     def _ensure_open(self) -> IO[str]:
         if self._file is None:
@@ -283,6 +285,8 @@ class JsonlWriter:
         f = self._ensure_open()
         f.write(json.dumps(record, ensure_ascii=False) + '\n')
         f.flush()
+        if self._durable:
+            os.fsync(f.fileno())
 
     def close(self) -> None:
         """Close the underlying file handle. Idempotent."""

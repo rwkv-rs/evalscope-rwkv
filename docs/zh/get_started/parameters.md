@@ -257,6 +257,7 @@ EvalScope 使用嵌套的 `--sandbox` 配置（对应 `SandboxTaskConfig`）统�
 | `--work-dir` | `str` | 评测输出路径（详见下方目录结构） | `./outputs` |
 | `--no-timestamp` | `bool` | 是否不在工作目录中添加时间戳 | `false` |
 | `--use-cache` | `str` | 复用本地缓存路径（如`outputs/20241210_194434`）<br>重用推理结果和评测结果 | `None` |
+| `--eval-retries` | `int` | 原生 benchmark 执行失败后的额外重试次数；在同一输出目录复用已保存的推理和评分阶段 | `0` |
 | `--rerun-review` | `bool` | 配合 `--use-cache` 使用：基于 predictions 缓存重跑评测/打分，并仅在成功后原子替换 reviews 缓存 | `false` |
 | `--enable-progress-tracker` | `bool` | 是否开启进度追踪，将层级评测进度实时写入`progress.json`，可通过服务接口查询 | `false` |
 | `--collect-perf` | `bool` | 采集每次推理请求的性能指标（延迟、TTFT、Token 用量），汇总后写入评测报告。采集 TTFT 需开启 `--generation-config stream=true`；使用 `--no-collect-perf` 可禁用 | `true` |
@@ -264,6 +265,13 @@ EvalScope 使用嵌套的 `--sandbox` 配置（对应 `SandboxTaskConfig`）统�
 | `--debug` | `bool` | 是否开启调试模式 | `false` |
 | `--ignore-errors` | `bool` | 是否忽略生成过程中的错误 | `false` |
 | `--dry-run` | `bool` | 预检参数，不执行推理，只打印参数 | `false` |
+
+### 自动续跑
+
+已完成的推理和评分会逐条同步到磁盘。中断后使用 `--use-cache outputs/<运行目录>` 重新运行即可复用；
+以模型错误结束的缓存推理会重新生成。`--eval-retries N`（仅原生后端）会在进程内对失败的 benchmark
+最多重试 N 次（退避 5-60 秒），若仍有失败则在发布结果前停止。每个输出目录只使用一个进程，
+打乱数据集时请固定 `--seed`。
 
 ### work-dir 目录结构示例
 
