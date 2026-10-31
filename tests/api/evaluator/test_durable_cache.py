@@ -85,6 +85,16 @@ def test_complete_json_without_newline_is_retained(tmp_path: Path) -> None:
     assert len(manager._read_cache(str(path))) == 2
 
 
+def test_complete_cache_is_read_without_write_access(tmp_path: Path) -> None:
+    path = tmp_path / 'cache.jsonl'
+    path.write_text('{"index": 1}\n', encoding='utf-8')
+    path.chmod(0o444)
+    try:
+        assert cache(tmp_path)._read_cache(str(path)) == [{'index': 1}]
+    finally:
+        path.chmod(0o644)
+
+
 @pytest.mark.parametrize('contents', [b'{broken}\n', b'{broken}\n{"index": 0}\n'])
 def test_malformed_complete_records_are_not_silently_deleted(tmp_path: Path, contents: bytes) -> None:
     manager = cache(tmp_path)

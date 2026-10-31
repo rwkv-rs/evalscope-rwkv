@@ -19,9 +19,11 @@ def _config(**kwargs: object) -> TaskConfig:
     return TaskConfig(model='test-model', eval_type='mock_llm', seed=None, **kwargs)
 
 
-def _evaluator(result: object, **kwargs: object) -> SimpleNamespace:
+def _evaluator(result: object, has_retryable_errors: bool = False) -> SimpleNamespace:
     evaluate = Mock(side_effect=result) if isinstance(result, BaseException) else Mock(return_value=result)
-    return SimpleNamespace(benchmark_name='test-benchmark', model=object(), eval=evaluate, **kwargs)
+    return SimpleNamespace(
+        benchmark_name='test-benchmark', model=object(), eval=evaluate, has_retryable_errors=has_retryable_errors
+    )
 
 
 @pytest.mark.parametrize('value', [-1, -10])
@@ -34,6 +36,11 @@ def test_retry_count_cannot_be_negative(value: int) -> None:
 def test_concurrency_must_be_positive(value: int) -> None:
     with pytest.raises(ValidationError):
         _config(eval_batch_size=value)
+
+
+def test_retries_require_native_backend() -> None:
+    with pytest.raises(ValidationError, match='only supported by the native backend'):
+        _config(eval_retries=1, eval_backend='OpenCompass')
 
 
 def test_cli_retry_count_and_default() -> None:

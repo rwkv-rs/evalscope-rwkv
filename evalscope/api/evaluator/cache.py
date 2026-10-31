@@ -74,30 +74,40 @@ class CacheManager:
         return self._writers[cache_file]
 
     def _read_cache(self, cache_file: str) -> List[Dict[str, Any]]:
-        """Recover only an interrupted final append; malformed complete records still fail."""
-        records = []
-        with self._write_lock, open(cache_file, 'rb+') as stream:
-            while line := stream.readline():
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    if line.endswith(b'\n'):
-                        raise
-                    stream.seek(-len(line), os.SEEK_CUR)
-                    stream.truncate()
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                    logger.warning(f'Removed interrupted final cache record from {cache_file}.')
-                    break
-                records.append(record)
-                if not line.endswith(b'\n'):
-                    # A complete JSON value without its delimiter must not merge with the next append.
-                    stream.write(b'\n')
-                    stream.flush()
-                    os.fsync(stream.fileno())
+        """Read cached records, repairing only an interrupted final append.
+
+        Malformed newline-terminated records still raise. The file is reopened for writing only
+        when its last line lacks a newline, so complete read-only caches remain usable.
+        """
+        records: List[Dict[str, Any]] = []
+        line, torn = b'', False
+        with self._write_lock:
+            with open(cache_file, 'rb') as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        if line.endswith(b'\n'):
+                            raise
+                        torn = True
+            if line and not line.endswith(b'\n'):
+                self._repair_tail(cache_file, line, torn)
         return records
+
+    @staticmethod
+    def _repair_tail(cache_file: str, tail: bytes, torn: bool) -> None:
+        with open(cache_file, 'rb+') as stream:
+            end = stream.seek(0, os.SEEK_END)
+            if torn:
+                stream.truncate(end - len(tail))
+                logger.warning(f'Removed interrupted final cache record from {cache_file}.')
+            else:
+                # A complete record without its delimiter must not merge with the next append.
+                stream.write(b'\n')
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def close(self) -> None:
         """Close all open writers. Idempotent — safe to call multiple times."""

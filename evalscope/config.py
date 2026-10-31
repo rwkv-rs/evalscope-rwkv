@@ -504,6 +504,8 @@ class TaskConfig(BaseArgument):
         self._init_default_model_args()
         self._init_default_sandbox_config()
         self._parse_rag_eval_config()
+        if self.eval_retries and self.eval_backend != EvalBackend.NATIVE:
+            raise ValueError('eval_retries is only supported by the native backend')
 
         return self
 

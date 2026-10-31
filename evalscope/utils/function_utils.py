@@ -206,7 +206,7 @@ def run_in_threads_with_progress(
                     pass
 
             # Fill the initial sliding window.
-            for _ in range(effective_max_workers):
+            for _ in range(max_workers):
                 _try_submit_next()
 
             while pending_futures:

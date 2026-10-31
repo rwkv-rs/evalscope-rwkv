@@ -277,6 +277,8 @@ class DefaultEvaluator(Evaluator):
                 for task_state in cached_pred_states:
                     self._record_perf(task_state)
             reuse_reviews = self.use_cache and not self.task_config.rerun_review
+            # ``delete_review_cache`` stages a transactional rewrite. Without an existing
+            # review file, write reviews directly so each one is a durable checkpoint.
             if not reuse_reviews and (
                 self.task_config.rerun_review or os.path.exists(self.cache_manager.get_review_cache_path(subset))
             ):

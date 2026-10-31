@@ -45,8 +45,6 @@ def run_single_task(task_cfg: TaskConfig) -> dict:
     configure_logging(task_cfg.debug, os.path.join(outputs.logs_dir, 'eval_log.log'))
 
     if task_cfg.eval_backend != EvalBackend.NATIVE:
-        if task_cfg.eval_retries:
-            raise ValueError('--eval-retries is only supported by the native backend')
         result = run_non_native_backend(task_cfg, outputs)
     else:
         logger.info('Running with native backend')
@@ -147,23 +145,13 @@ def _evaluate_with_retries(
     """Retry only this benchmark, with fresh runtime state and durable sample caches."""
     from evalscope.api.registry import create_evaluator, get_benchmark
 
-    for attempt in range(task_config.eval_retries + 1):
-        try:
-            report = evaluator.eval()
-            summary = getattr(report, 'execution_summary', None)
-            failed = (summary is not None and summary.errored > 0) or getattr(evaluator, 'has_retryable_errors', False)
-            if not task_config.eval_retries or not failed:
-                return report
-            # An exhausted partial attempt must not be published as a completed benchmark.
-            raise RuntimeError(f'{evaluator.benchmark_name}: execution failures remain; cache: {outputs.outputs_dir}')
-        except Exception:
-            if attempt == task_config.eval_retries:
-                raise
-            delay = min(60, 5 * 2**attempt)
+    retries = task_config.eval_retries
+    for attempt in range(retries + 1):
+        if attempt:
+            delay = min(60, 5 * 2**(attempt - 1))
             logger.warning(
-                f'{evaluator.benchmark_name}: retry {attempt + 1}/{task_config.eval_retries} '
-                f'in {delay}s, resuming from {outputs.outputs_dir}',
-                exc_info=True,
+                f'{evaluator.benchmark_name}: retry {attempt}/{retries} in {delay}s, '
+                f'resuming from {outputs.outputs_dir}'
             )
             time.sleep(delay)
             retry_config = task_config.model_copy(update={'use_cache': outputs.outputs_dir})
@@ -172,11 +160,22 @@ def _evaluate_with_retries(
             benchmark = get_benchmark(evaluator.benchmark_name, retry_config)
             benchmark.validate_judge_strategy()
             evaluator = create_evaluator(
-                benchmark=benchmark,
-                model=evaluator.model,
-                outputs=outputs,
-                task_config=retry_config,
+                benchmark=benchmark, model=evaluator.model, outputs=outputs, task_config=retry_config
             )
+        try:
+            report = evaluator.eval()
+        except Exception:
+            if attempt == retries:
+                raise
+            logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} failed', exc_info=True)
+            continue
+        summary = getattr(report, 'execution_summary', None)
+        failed = evaluator.has_retryable_errors or (summary is not None and summary.errored > 0)
+        if not retries or not failed:
+            return report
+        logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} finished with execution failures')
+    # An exhausted partial attempt must not be published as a completed benchmark.
+    raise RuntimeError(f'{evaluator.benchmark_name}: execution failures remain; cache: {outputs.outputs_dir}')
 
 
 def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
