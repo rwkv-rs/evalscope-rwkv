@@ -285,10 +285,8 @@ def test_empty_report_scores_zero_with_axis_metrics_and_no_judge(report: str, mo
     assert score.status is ScoreStatus.SUCCESS
     assert score.prediction == report
     assert score.main_score_name == 'compliance_score'
-    assert score.metadata['empty_report'] is True
     assert score.metadata['judge_skipped'] is True
     assert score.metadata['judge_skip_reason'] == 'empty_report'
-    assert score.metadata['sample_id'] == 'sample-1'
     assert score.metadata['agent']['strategy'] == 'function_calling'
     assert score.judge_summary is None
     initialize.assert_not_called()

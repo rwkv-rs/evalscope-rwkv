@@ -135,6 +135,10 @@ Resources: [Paper](https://arxiv.org/abs/2511.07685) |
 """
 
 
+def _is_empty_report(task_state: TaskState) -> bool:
+    return not (task_state.output.completion or '').strip()
+
+
 @register_benchmark(
     BenchmarkMeta(
         name='researchrubrics',
@@ -219,7 +223,7 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
     ) -> List[SampleScore]:
         if not task_states:
             return sample_scores
-        if any(state.output.completion.strip() for state in task_states):
+        if not all(map(_is_empty_report, task_states)):
             self.llm_judge  # Initialize once before worker threads access it.
         workers = min(max(int(self._task_config.eval_batch_size), 1), len(task_states))
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -260,7 +264,7 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
 
     def _score_task_state(self, task_state: TaskState) -> Score:
         report = task_state.output.completion or ''
-        if not report.strip() and (task_state.output.error or task_state.output.empty):
+        if _is_empty_report(task_state) and (task_state.output.error or task_state.output.empty):
             raise ValueError(
                 f'ResearchRubrics sample {task_state.metadata.get("sample_id")} has no usable model output.'
             )
@@ -314,7 +318,7 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
 
     def judge_definition(self, context: JudgeContext) -> JudgeDefinition:
         cases = self._build_cases(context)
-        if not context.filtered_prediction.strip():
+        if _is_empty_report(context.task_state):
             entries = [{'score': 0.0, **case.metadata} for case in cases]
             return JudgeDefinition.skip(
                 Score(
@@ -326,10 +330,8 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
                     metadata={
                         'source': 'researchrubrics_empty_report',
                         'grading_mode': 'rule',
-                        'empty_report': True,
                         'rubric_count': len(cases),
                         'used_chunking': False,
-                        'sample_id': context.task_state.metadata.get('sample_id') or context.task_state.sample_id,
                     },
                 ),
                 reason='empty_report',

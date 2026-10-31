@@ -223,13 +223,8 @@ run_task(task_config)
 
 ## ResearchRubrics 空报告
 
-ResearchRubrics 评测版本 `v1.1` 将已完成的空报告或纯空白报告计为零分，包含具有正权重
-rubric 的各维度分数。此时使用确定性评分，记录 `judge_skipped=true` 和
-`judge_skip_reason=empty_report`，不调用 judge；仍保留 rubric 校验和 Agent 轨迹元数据。
-
-模型响应缺少 choices，或空输出带有模型错误时，仍按评测失败处理。非空报告继续使用 judge
-契约：无法解析的 judge 回复和 judge 传输故障会使样本被排除出评分，不计为零分。
-历史分数在显式重新评分前保留原评测版本。
+自评测版本 `v1.1` 起，正常生成的空报告直接计为零分，不调用 judge
+（`judge_skip_reason=empty_report`）。因模型错误导致的空输出仍按失败处理。
 
 ## 常见问题
 

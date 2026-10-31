@@ -225,15 +225,9 @@ Prerequisites: `pip install evalscope[swe_bench]`, Docker installed locally.
 
 ## ResearchRubrics empty reports
 
-ResearchRubrics evaluation version `v1.1` counts a completed empty or whitespace-only
-report as zero compliance, including axes with positive-weight rubrics. This result
-uses deterministic scoring with `judge_skipped=true` and `judge_skip_reason=empty_report`;
-it does not call a judge. Rubric validation and Agent trace metadata are retained.
-
-Missing model choices or an empty output carrying a model error remain evaluation
-failures. A nonempty report still uses the judge contract: malformed judge replies
-and judge transport failures exclude the sample instead of contributing zero.
-Historical scores retain their original evaluation version until explicitly re-graded.
+Since evaluation version `v1.1`, a successfully generated empty report scores zero
+without calling the judge (`judge_skip_reason=empty_report`). Empty outputs caused by
+model errors still fail.
 
 ## FAQ
 
