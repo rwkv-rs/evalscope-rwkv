@@ -414,6 +414,19 @@ def synthesize_agent_messages(
 # ----------------------------
 
 
+def _native_json_schema(schema: Dict[str, Any], type_mapping: Dict[str, type]) -> Dict[str, Any]:
+    """Map BFCL source-language types to its checker types for decoded JSON values."""
+    labels = {str: 'string', int: 'integer', float: 'float', bool: 'boolean', list: 'array', dict: 'dict'}
+    value_type = type_mapping[schema['type']]
+    if value_type not in labels:
+        raise ValueError(f"Unsupported BFCL native-FC type: {schema['type']}")
+    adapted = deepcopy(schema)
+    adapted['type'] = labels[value_type]
+    if value_type is list and 'items' in adapted:
+        adapted['items'] = _native_json_schema(adapted['items'], type_mapping)
+    return adapted
+
+
 def compute_entry_result(
     handler: Any,
     model_result: Any,
@@ -481,17 +494,36 @@ def compute_entry_result(
             language = Language.PYTHON
             return_format = ReturnFormat.PYTHON
 
-        return _evaluate_single_ast_entry(
+        grading_entry = prompt_entry
+        if handler.is_fc_model and language in (Language.JAVA, Language.JAVASCRIPT):
+            from bfcl_eval.constants.type_mappings import JAVA_TYPE_CONVERSION, JS_TYPE_CONVERSION
+
+            # Native FC already decoded JSON; Java/JS source converters expect strings and
+            # would reject real booleans/numbers or accept incorrectly stringified values.
+            mapping = JAVA_TYPE_CONVERSION if language == Language.JAVA else JS_TYPE_CONVERSION
+            grading_entry = deepcopy(prompt_entry)
+            for function in grading_entry['function']:
+                parameters = function['parameters']
+                parameters['properties'] = {
+                    name: _native_json_schema(schema, mapping)
+                    for name, schema in parameters['properties'].items()
+                }
+            language = Language.PYTHON
+
+        result = _evaluate_single_ast_entry(
             handler=handler,
             index=index,
             model_result_item=model_result,
             possible_answer_item=ground_truth,
-            prompt_entry=prompt_entry,
+            prompt_entry=grading_entry,
             model_name=model_name,
             test_category=test_category,
             language=language,
             return_format=return_format,
         )
+        if 'prompt' in result:
+            result['prompt'] = prompt_entry
+        return result
 
 
 # ----------------------------

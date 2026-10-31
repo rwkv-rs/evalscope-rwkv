@@ -133,6 +133,16 @@ run_task(task_cfg=task_cfg)
 BFCL-v4 forwards `temperature` and `max_tokens` from `generation_config`. An unset
 `max_tokens` is omitted from requests; other generation parameters are not forwarded.
 
+### Scoring compatibility
+
+Evaluation version `v1.1` checks native function-call JSON arguments in the Java and
+JavaScript subsets using BFCL's decoded-value checks. It maps the declared type names
+without converting model values: a JSON boolean is accepted as a boolean, while a
+string such as `"true"` is not coerced into one. Official function-name, call-count,
+required-argument, type and value checks remain in use. Prompting-mode source parsing
+and Python subsets are unchanged. Re-grade saved predictions to use the new scoring
+version; historical scores are not automatically relabeled.
+
 Output example:
 
 ```text
