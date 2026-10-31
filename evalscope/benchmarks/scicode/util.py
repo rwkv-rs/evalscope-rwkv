@@ -4,15 +4,17 @@ from evalscope.api.evaluator import TaskState
 from evalscope.utils.code_utils import extract_code_from_freeform_completion
 
 
-def extract_code(block: str) -> str:
-    """Extract the first Python block using the same parser as other code benchmarks."""
+def _is_python(text: str) -> bool:
     try:
-        ast.parse(block)
+        ast.parse(text)
     except SyntaxError:
-        pass
-    else:
-        # The shared heuristic keeps only one block; valid raw programs can
-        # contain several helpers and module-level constants that must survive.
+        return False
+    return True
+
+
+def extract_code(block: str) -> str:
+    """Return a raw Python program unchanged; otherwise extract its first fenced Python block."""
+    if _is_python(block):
         return block.strip()
     code, _ = extract_code_from_freeform_completion(block, 'python', first_block_only=True)
     return (code if code.strip() else block).strip()

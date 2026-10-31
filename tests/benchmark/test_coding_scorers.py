@@ -69,7 +69,6 @@ def test_bigcodebench_executes_tests(make_adapter: Callable[..., Any], name: str
     assert score.value == {'acc': passed}
     assert score.prediction == 'original response'
     assert score.extracted_prediction == solution
-    assert score.metadata['scorer_protocol'] == 'explicit-unittest-v1'
 
 
 def test_bigcodebench_runs_all_dataset_classes(make_adapter: Callable[..., Any]) -> None:
@@ -136,7 +135,6 @@ def test_mbpp_plus_runs_expanded_tests(make_adapter: Callable[..., Any], solutio
     assert score.prediction == 'original response'
     assert score.extracted_prediction == solution
     assert score.metadata['timeout'] == 120
-    assert score.metadata['scorer_protocol'] == 'full-expanded-tests-v1'
 
 
 def test_mbpp_plus_keeps_prompt_examples_and_supports_string_imports(make_adapter: Callable[..., Any]) -> None:

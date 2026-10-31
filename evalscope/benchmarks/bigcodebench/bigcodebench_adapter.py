@@ -157,9 +157,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         """Prepare the dependency image for pooled execution, or use a custom build."""
         build_context = self.extra_params.get('docker_build_context') or ''
         if not build_context:
-            if self._task_config is not None and self._task_config.sandbox.default_config.get('image'):
-                return None
-            if self.sandbox_config.get('image') != _SANDBOX_CONFIG['image']:
+            if not self.uses_default_sandbox_image(_SANDBOX_CONFIG['image']):
                 return None
             build_context = str(Path(__file__).parent / 'docker')
         return DockerImageSpec(
@@ -232,7 +230,6 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             'task_id': problem['task_id'],
             'timeout': self.review_timeout,
             'execution_result': res,
-            'scorer_protocol': 'explicit-unittest-v1',
         }
         score.main_score_name = 'acc'
 

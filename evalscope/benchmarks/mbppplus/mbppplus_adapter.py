@@ -2,7 +2,6 @@
 
 import ast
 import secrets
-from pathlib import Path
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -13,6 +12,7 @@ from evalscope.api.metric.semantics import MetricSelector
 from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
+from evalscope.benchmarks.humanevalplus.humanevalplus_adapter import numpy_image_spec
 from evalscope.constants import Tags
 from evalscope.utils.logger import get_logger
 
@@ -85,18 +85,8 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         super().__init__(**kwargs)
 
     def get_sandbox_image_spec(self) -> DockerImageSpec | None:
-        """Reuse the NumPy image needed by the expanded EvalPlus test programs."""
-        if self._task_config is not None and self._task_config.sandbox.default_config.get('image'):
-            return None
-        if self.sandbox_config.get('image') != 'python3.11-numpy':
-            return None
-        context = Path(__file__).parent.parent / 'humanevalplus' / 'docker'
-        return DockerImageSpec(
-            name_prefix='python3.11-numpy',
-            context_dir=str(context),
-            dockerfile=str(context / 'Dockerfile'),
-            cache_key_parts=['sandbox', 'python3.11-numpy'],
-        )
+        """Reuse the HumanEval+ NumPy image needed by the expanded EvalPlus tests."""
+        return numpy_image_spec() if self.uses_default_sandbox_image('python3.11-numpy') else None
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """Convert a data record to a Sample object."""
@@ -156,6 +146,8 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         )
         problem = task_state.metadata
         test = problem['test']
+        # Expanded EvalPlus tests are top-level asserts or a loop over inputs; anything else
+        # would make a passing run vacuous.
         if not any(isinstance(node, (ast.Assert, ast.For)) for node in ast.parse(test).body):
             raise ValueError('MBPP+ expanded test data contains no executable checks.')
         imports = problem.get('test_imports', [])
@@ -172,7 +164,6 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             'task_id': problem['task_id'],
             'timeout': self.review_timeout,
             'execution_result': res,
-            'scorer_protocol': 'full-expanded-tests-v1',
         }
         score.main_score_name = 'acc'
 
