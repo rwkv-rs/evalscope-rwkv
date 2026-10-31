@@ -1,25 +1,21 @@
+import ast
+
 from evalscope.api.evaluator import TaskState
+from evalscope.utils.code_utils import extract_code_from_freeform_completion
 
 
 def extract_code(block: str) -> str:
-    """
-    Extract the Python code from a code block by removing markdown-style code fences.
-
-    This function removes the "```python" and "```" delimiters often used in markdown to denote
-    Python code blocks, and strips any leading or trailing whitespace.
-
-    Parameters:
-    -----------
-    block: str
-        A string containing a Python code block with markdown-style code fences.
-
-    Returns:
-    --------
-    str
-        The extracted code with the code fences and surrounding whitespace removed.
-
-    """
-    return block.replace('```python', '').replace('```', '').strip()
+    """Extract the first Python block using the same parser as other code benchmarks."""
+    try:
+        ast.parse(block)
+    except SyntaxError:
+        pass
+    else:
+        # The shared heuristic keeps only one block; valid raw programs can
+        # contain several helpers and module-level constants that must survive.
+        return block.strip()
+    code, _ = extract_code_from_freeform_completion(block, 'python', first_block_only=True)
+    return (code if code.strip() else block).strip()
 
 
 def get_generated_code(state: TaskState) -> list[str]:

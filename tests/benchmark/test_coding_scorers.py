@@ -14,6 +14,7 @@ import pytest
 
 from evalscope.api.benchmark import DefaultDataAdapter
 from evalscope.api.registry import get_benchmark
+from evalscope.benchmarks.scicode.util import extract_code, get_generated_code
 from evalscope.config import TaskConfig
 
 BCB_TEST = '''import unittest
@@ -196,6 +197,42 @@ def test_explicit_sandbox_images_are_preserved(make_adapter: Callable[..., Any],
     assert adapter.get_sandbox_image_spec() is None
 
 
-@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard', 'mbpp_plus'])
+@pytest.mark.parametrize('completion', [
+    'def answer():\n    return 42',
+    '```python\ndef answer():\n    return 42\n```',
+    '>\n```python\ndef answer():\n    return 42\n```',
+    'Here is the solution:\n```py\ndef answer():\n    return 42\n```\nExplanation follows.',
+    '```Python\ndef answer():\n    return 42\n```\n```python\nraise RuntimeError()\n```',
+    '```python\ndef answer():\n    return 42',
+])
+def test_scicode_extracts_first_python_block(completion: str) -> None:
+    assert extract_code(completion) == 'def answer():\n    return 42'
+
+
+def test_scicode_preserves_literal_fences_and_empty_answers() -> None:
+    assert extract_code('') == ''
+    assert extract_code('   ') == ''
+    code = "def answer():\n    return '```python'"
+    assert extract_code(code) == code
+
+
+def test_scicode_preserves_complete_raw_program() -> None:
+    code = 'SCALE = 2\n\ndef helper(x):\n    return x * SCALE\n\ndef answer():\n    return helper(21)'
+    assert extract_code(code) == code
+
+
+def test_scicode_preserves_subproblem_order() -> None:
+    state = SimpleNamespace(
+        messages=[
+            SimpleNamespace(role='user', text='question'),
+            SimpleNamespace(role='assistant', text='```python\nx = 1\n```'),
+            SimpleNamespace(role='assistant', text='```python\ny = 2\n```'),
+        ],
+        metadata={'sub_steps': [1, 2]},
+    )
+    assert get_generated_code(state) == ['x = 1', 'y = 2']
+
+
+@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard', 'mbpp_plus', 'scicode'])
 def test_changed_scoring_has_new_evaluation_version(make_adapter: Callable[..., Any], name: str) -> None:
     assert make_adapter(name).benchmark_meta.evaluation_version == 'v1.1'
