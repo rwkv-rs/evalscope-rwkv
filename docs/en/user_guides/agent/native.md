@@ -200,6 +200,12 @@ Use `NativeAgentConfig(strategy='swe_bench_backticks')` for models that do not s
 Prerequisites: `pip install evalscope[swe_bench]`, Docker installed locally.
 ```
 
+## ResearchRubrics empty reports
+
+Since evaluation version `v1.1`, a successfully generated empty report scores zero
+without calling the judge (`judge_skip_reason=empty_report`). Empty outputs caused by
+model errors still fail.
+
 ## FAQ
 
 **The model never calls any tool**
