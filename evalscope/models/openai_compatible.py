@@ -59,7 +59,11 @@ _NON_RETRYABLE_COMPLETION_ERRORS = (*NON_RETRYABLE_OPENAI_ERRORS, _NonRetryableE
 
 
 def _normalize_output_limit_stop_reason(output: ModelOutput, config: GenerateConfig) -> None:
-    """Repair providers that report ``stop`` after consuming ``max_tokens`` exactly."""
+    """Repair providers that report ``stop`` after consuming ``max_tokens`` exactly.
+
+    A response whose natural end falls exactly on the limit is also labelled ``max_tokens``;
+    over-reporting truncation is preferred to silently hiding it.
+    """
     if config.max_tokens is None or output.usage is None or not output.choices:
         return
     if output.stop_reason != 'stop' or output.usage.output_tokens < config.max_tokens:
