@@ -29,6 +29,7 @@ logger = get_logger()
 @register_benchmark(
     BenchmarkMeta(
         name='scicode',
+        evaluation_version='v1.1',
         pretty_name='SciCode',
         tags=[Tags.CODING],
         description="""

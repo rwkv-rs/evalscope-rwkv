@@ -1,5 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+import ast
+import secrets
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -9,6 +11,8 @@ from evalscope.api.metric import Score
 from evalscope.api.metric.semantics import MetricSelector
 from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
+from evalscope.api.sandbox import DockerImageSpec
+from evalscope.benchmarks.humanevalplus.humanevalplus_adapter import numpy_image_spec
 from evalscope.constants import Tags
 from evalscope.utils.logger import get_logger
 
@@ -51,6 +55,7 @@ MBPP Plus is a fortified version of the MBPP benchmark, created to improve evalu
 @register_benchmark(
     BenchmarkMeta(
         name='mbpp_plus',
+        evaluation_version='v1.1',
         pretty_name='MBPP-Plus',
         tags=[Tags.CODING],
         description=DESCRIPTION,
@@ -63,7 +68,7 @@ MBPP Plus is a fortified version of the MBPP benchmark, created to improve evalu
         prompt_template=PROMPT,
         review_timeout=20,
         sandbox_config={
-            'image': 'python:3.11-slim',
+            'image': 'python3.11-numpy',
             'tools_config': {
                 'shell_executor': {},
                 'python_executor': {}
@@ -78,6 +83,10 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+    def get_sandbox_image_spec(self) -> DockerImageSpec | None:
+        """Reuse the HumanEval+ NumPy image needed by the expanded EvalPlus tests."""
+        return numpy_image_spec() if self.uses_default_sandbox_image('python3.11-numpy') else None
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """Convert a data record to a Sample object."""
@@ -123,6 +132,7 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
+        """Execute the complete expanded tests, retaining test_list only in the prompt."""
 
         if not self.use_sandbox:
             raise RuntimeError(
@@ -135,16 +145,26 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             prediction=original_prediction,
         )
         problem = task_state.metadata
-        completion = filtered_prediction
-        # Append test cases to the completion
-        for test in task_state.metadata['test_list']:
-            completion += '\n' + test + '\n'
+        test = problem['test']
+        # Expanded EvalPlus tests are top-level asserts or a loop over inputs; anything else
+        # would make a passing run vacuous.
+        if not any(isinstance(node, (ast.Assert, ast.For)) for node in ast.parse(test).body):
+            raise ValueError('MBPP+ expanded test data contains no executable checks.')
+        imports = problem.get('test_imports', [])
+        if isinstance(imports, str):
+            imports = [imports]
+        marker = 'EVALSCOPE_MBPP_PLUS_PASSED_' + secrets.token_hex(16)
+        completion = '\n'.join([*imports, filtered_prediction, test, f'print("\\n" + {marker!r})'])
 
         res = self.execute_code_in_sandbox(code=completion, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success'
+        passed = res.get('status') == 'success' and marker in str(res.get('output', '')).splitlines()
         # Set score values
         score.value = {'acc': passed}
-        score.metadata = {'task_id': problem['task_id'], 'timeout': self.review_timeout, 'execution_result': res}
+        score.metadata = {
+            'task_id': problem['task_id'],
+            'timeout': self.review_timeout,
+            'execution_result': res,
+        }
         score.main_score_name = 'acc'
 
         return score

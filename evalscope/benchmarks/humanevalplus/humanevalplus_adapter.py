@@ -18,6 +18,19 @@ from evalscope.utils.logger import get_logger
 
 logger = get_logger()
 
+DOCKER_PATH = Path(__file__).parent / 'docker'
+
+
+def numpy_image_spec() -> DockerImageSpec:
+    """Python 3.11 + NumPy image shared by the EvalPlus benchmarks."""
+    return DockerImageSpec(
+        name_prefix='python3.11-numpy',
+        context_dir=DOCKER_PATH.as_posix(),
+        dockerfile=(DOCKER_PATH / 'Dockerfile').as_posix(),
+        cache_key_parts=['sandbox', 'python3.11-numpy'],
+    )
+
+
 DESCRIPTION = """
 ## Overview
 
@@ -79,7 +92,7 @@ class HumanevalplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.docker_path = Path(__file__).parent / 'docker'
+        self.docker_path = DOCKER_PATH
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """Convert a data record to a Sample object."""
@@ -103,12 +116,7 @@ class HumanevalplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
 
     def get_sandbox_image_spec(self) -> DockerImageSpec:
         """Return the benchmark-level Docker image used by the sandbox pool."""
-        return DockerImageSpec(
-            name_prefix='python3.11-numpy',
-            context_dir=self.docker_path.as_posix(),
-            dockerfile=(self.docker_path / 'Dockerfile').as_posix(),
-            cache_key_parts=['sandbox', 'python3.11-numpy'],
-        )
+        return numpy_image_spec()
 
     @classmethod
     def _postprocess(cls, text: str) -> str:

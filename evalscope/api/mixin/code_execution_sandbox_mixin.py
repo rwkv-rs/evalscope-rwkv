@@ -227,6 +227,11 @@ class CodeExecutionSandboxMixin:
         """Return a benchmark-level Docker image spec for the code execution pool, if needed."""
         return None
 
+    def uses_default_sandbox_image(self, default_image: str) -> bool:
+        """Whether the user kept ``default_image``; a returned image spec would replace any override."""
+        task_image = self._task_config.sandbox.default_config.get('image') if self._task_config else None
+        return not task_image and self.sandbox_config.get('image') == default_image
+
     @thread_safe
     def ensure_sandbox_ready(self) -> bool:
         """Ensure the sandbox backend is initialized.  Thread-safe and idempotent."""
