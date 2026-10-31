@@ -120,13 +120,17 @@ task_cfg = TaskConfig(
         }
     },
     generation_config={
-        'temperature': 0, # 只支持设置温度参数，其他参数会被忽略
+        'temperature': 0,
+        'max_tokens': 2048, # 可选的单次响应输出上限，适用于记忆预处理和所有对话轮次
     },
     use_cache='outputs/bfcl_v4', # 建议设置缓存目录，评测出错时可以加快重跑速度
     limit=10,  # 限制评测数量，便于快速测试，正式评测时建议去掉此项
 )
 run_task(task_cfg=task_cfg)
 ```
+
+BFCL-v4 会传递 `generation_config` 中的 `temperature` 和 `max_tokens`。
+未设置 `max_tokens` 时，请求中不包含该字段；其他生成参数不会传递。
 
 输出示例：
 

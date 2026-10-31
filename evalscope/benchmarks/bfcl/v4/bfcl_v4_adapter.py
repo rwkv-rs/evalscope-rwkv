@@ -178,7 +178,7 @@ class BFCLV4Adapter(AgentAdapter):
         if self.handler is not None:
             return  # Handler already initialized
 
-        from bfcl_eval.model_handler.api_inference.openai_completion import OpenAICompletionsHandler
+        from .handler import ConfiguredOpenAICompletionsHandler
 
         # Set env variables for OpenAI API
         base_url = _normalize_openai_base_url(self._task_config.api_url)
@@ -188,13 +188,14 @@ class BFCLV4Adapter(AgentAdapter):
         else:
             os.environ.pop('OPENAI_BASE_URL', None)
 
-        patch_openai_completions_handler_empty_tool_calls(OpenAICompletionsHandler)
+        patch_openai_completions_handler_empty_tool_calls(ConfiguredOpenAICompletionsHandler)
 
-        self.handler = OpenAICompletionsHandler(
+        self.handler = ConfiguredOpenAICompletionsHandler(
             model_name=self._task_config.model,
             temperature=self._task_config.generation_config.temperature,
             registry_name=self._task_config.model_id,
             is_fc_model=self.is_fc_model,
+            max_tokens=self._task_config.generation_config.max_tokens,
         )
 
         self._prereq_inference()
