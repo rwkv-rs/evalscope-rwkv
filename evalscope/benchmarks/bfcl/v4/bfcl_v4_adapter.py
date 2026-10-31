@@ -44,6 +44,7 @@ def _normalize_openai_base_url(api_url: Optional[str]) -> str:
 @register_benchmark(
     BenchmarkMeta(
         name='bfcl_v4',
+        evaluation_version='v1.1',
         pretty_name='BFCL-v4',
         tags=[Tags.FUNCTION_CALLING, Tags.AGENT],
         description="""
