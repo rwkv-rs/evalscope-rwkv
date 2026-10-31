@@ -1,5 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+import secrets
+from pathlib import Path
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -12,6 +14,8 @@ from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
+
+from .utils import EMPTY_SUITE_ERROR, build_test_program
 
 DESCRIPTION = """
 ## Overview
@@ -118,6 +122,7 @@ _SANDBOX_CONFIG = {
 @register_benchmark(
     BenchmarkMeta(
         name='bigcodebench',
+        evaluation_version='v1.1',
         pretty_name='BigCodeBench',
         tags=[Tags.CODING],
         description=DESCRIPTION,
@@ -149,10 +154,14 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             self.eval_split = version
 
     def get_sandbox_image_spec(self) -> DockerImageSpec | None:
-        """Return an optional user-provided local Docker image build spec."""
+        """Prepare the dependency image for pooled execution, or use a custom build."""
         build_context = self.extra_params.get('docker_build_context') or ''
         if not build_context:
-            return None
+            if self._task_config is not None and self._task_config.sandbox.default_config.get('image'):
+                return None
+            if self.sandbox_config.get('image') != _SANDBOX_CONFIG['image']:
+                return None
+            build_context = str(Path(__file__).parent / 'docker')
         return DockerImageSpec(
             name_prefix=f'evalscope-{self.name}',
             context_dir=build_context,
@@ -208,12 +217,14 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         if self._calibrate:
             solution = problem['code_prompt'] + '\n    pass\n' + solution
 
-        # Construct full test program: solution + unittest test class
-        check_program = solution + '\n' + problem['test']
+        marker = 'EVALSCOPE_BCB_PASSED_' + secrets.token_hex(16)
+        check_program = build_test_program(solution, problem['test'], marker)
 
         # Execute in sandbox
         res = self.execute_code_in_sandbox(code=check_program, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success'
+        if EMPTY_SUITE_ERROR in str(res.get('error', '')):
+            raise RuntimeError('BigCodeBench test data did not produce any unittest cases.')
+        passed = res.get('status') == 'success' and marker in str(res.get('output', '')).splitlines()
 
         # Set score values
         score.value = {'acc': passed}
@@ -221,6 +232,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             'task_id': problem['task_id'],
             'timeout': self.review_timeout,
             'execution_result': res,
+            'scorer_protocol': 'explicit-unittest-v1',
         }
         score.main_score_name = 'acc'
 
@@ -230,6 +242,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
 @register_benchmark(
     BenchmarkMeta(
         name='bigcodebench_hard',
+        evaluation_version='v1.1',
         pretty_name='BigCodeBench-Hard',
         tags=[Tags.CODING],
         description=HARD_DESCRIPTION,
