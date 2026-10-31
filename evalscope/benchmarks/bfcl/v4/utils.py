@@ -498,8 +498,10 @@ def compute_entry_result(
         if handler.is_fc_model and language in (Language.JAVA, Language.JAVASCRIPT):
             from bfcl_eval.constants.type_mappings import JAVA_TYPE_CONVERSION, JS_TYPE_CONVERSION
 
-            # Native FC already decoded JSON; Java/JS source converters expect strings and
-            # would reject real booleans/numbers or accept incorrectly stringified values.
+            # Native FC arguments are already decoded JSON, but the Java/JS checkers expect
+            # source strings. Grade them with the Python (decoded-value) checker instead,
+            # after mapping the declared Java/JS type names to its labels. The official
+            # checker only inspects the top-level type and one level of ``items``.
             mapping = JAVA_TYPE_CONVERSION if language == Language.JAVA else JS_TYPE_CONVERSION
             grading_entry = deepcopy(prompt_entry)
             for function in grading_entry['function']:

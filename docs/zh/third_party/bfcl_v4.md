@@ -129,16 +129,10 @@ task_cfg = TaskConfig(
 run_task(task_cfg=task_cfg)
 ```
 
-BFCL-v4 会传递 `generation_config` 中的 `temperature` 和 `max_tokens`。
-未设置 `max_tokens` 时，请求中不包含该字段；其他生成参数不会传递。
+`generation_config` 中仅 `temperature` 和 `max_tokens` 会被传递。
 
-### 评分兼容性
-
-评测版本 `v1.1` 对 Java 和 JavaScript 子集的原生函数调用 JSON 参数使用 BFCL 的解码值检查。
-适配只映射声明的类型名，不转换模型返回值：JSON 布尔值按布尔类型检查，`"true"` 等字符串
-不会被强制转换成布尔值。函数名、调用数量、必填参数、类型和值仍由官方检查器验证。
-提示词模式的源码解析和 Python 子集保持原有行为。需要重新评分已保存的预测才能使用新版本，
-历史分数不会自动改标。
+自评测版本 `v1.1` 起，原生函数调用模式下 Java/JavaScript 参数按解码后的 JSON 值检查
+（例如 `true` 是布尔值，`"true"` 不是）。
 
 输出示例：
 
