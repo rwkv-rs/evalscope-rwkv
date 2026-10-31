@@ -6,6 +6,8 @@ import gzip
 import hashlib
 import json
 import os
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import quote
@@ -14,8 +16,11 @@ from urllib.request import Request, urlopen
 import yaml
 
 SCHEMA_VERSION = 'scoreboard-v1'
-MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024, 512 * 1024 * 1024
+MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_SAMPLES_PER_OUTCOME = 20
+MAX_FAIL_REASON_CHARS = 2000  # Scoreboard rejects longer fail_reason values.
+FIELD_PATTERN = re.compile(r'[a-z][a-z0-9_-]{0,63}')
 CONTRACT = {
     'producer': 'evalscope',
     'artifact_schema': 4,
@@ -33,8 +38,14 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_json(value)).hexdigest()
 
 
-def _send(base_url: str, token: str, method: str, path: str, idempotency_key: str,
-          payload: Mapping[str, Any] | None) -> tuple[int, dict[str, Any]]:
+def _send(
+    base_url: str,
+    token: str,
+    method: str,
+    path: str,
+    idempotency_key: str,
+    payload: Mapping[str, Any] | None,
+) -> tuple[int, dict[str, Any]]:
     headers = {'Authorization': f'Bearer {token}', 'Idempotency-Key': idempotency_key}
     compressed = None
     if payload is not None:
@@ -74,18 +85,27 @@ def _report_metrics(report: Mapping[str, Any]) -> tuple[dict[str, float], str, s
     return metrics, primary_metric, str(primary_identity['name'])
 
 
-def _sample(sample_index: int, subset: str, review: Mapping[str, Any], prediction: Mapping[str, Any],
-            metric_name: str) -> tuple[dict[str, Any], bool]:
+def _raw_message(message: Mapping[str, Any]) -> Any:
+    """Raw model output; a tool-call response may also carry text, so keep both."""
+    if message.get('tool_calls') and message.get('content'):
+        return {'content': message['content'], 'tool_calls': message['tool_calls']}
+    return message.get('tool_calls') or message.get('content')
+
+
+def _sample(
+    sample_index: int,
+    subset: str,
+    review: Mapping[str, Any],
+    prediction: Mapping[str, Any],
+    metric_name: str,
+) -> tuple[dict[str, Any], bool]:
     sample_score = review['sample_score']
     score = sample_score['score']
     output = prediction.get('model_output') or {}
     choices = output.get('choices') or []
     choice = choices[0] if choices else {}
     message = choice.get('message') or {}
-    raw_value = message.get('tool_calls') or message.get('content')
-    # A tool-call response can also contain text; preserve both in raw evidence.
-    if message.get('tool_calls') and message.get('content'):
-        raw_value = {'content': message['content'], 'tool_calls': message['tool_calls']}
+    raw_value = _raw_message(message)
     raw_completion = _text(score.get('prediction') if raw_value is None else raw_value)
     score_name = score.get('main_score_name') or metric_name
     score_value = (score.get('value') or {}).get(score_name) if score.get('status') == 'success' else None
@@ -98,7 +118,7 @@ def _sample(sample_index: int, subset: str, review: Mapping[str, Any], predictio
         messages = messages[:-1]
     elapsed = output.get('time')
     latency_ms = float(elapsed) * 1000 if isinstance(elapsed, (int, float)) and elapsed >= 0 else None
-    fail_reason = _text(score.get('explanation') or output.get('error')).strip()[:2000] or None
+    fail_reason = _text(score.get('explanation') or output.get('error')).strip()[:MAX_FAIL_REASON_CHARS] or None
     group_id = sample_score.get('group_id')
     stop_reason = str(choice.get('stop_reason') or 'unknown')
     return {
@@ -137,13 +157,18 @@ def _latest_offsets(rows: BinaryIO) -> dict[int, int]:
     return offsets
 
 
-def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tuple[list[dict[str, Any]], int, int]:
+def _samples(
+    root: Path,
+    model_id: str,
+    benchmark: str,
+    metric_name: str,
+) -> tuple[list[dict[str, Any]], int, int]:
     prediction_dir = root / 'predictions' / model_id
     review_dir = root / 'reviews' / model_id
     prefix = f'{benchmark}_'
     review_paths = sorted(path for path in review_dir.glob('*.jsonl') if path.name.startswith(prefix))
     samples: list[dict[str, Any]] = []
-    outcome_counts: dict[str, int] = {}
+    outcome_counts: Counter[str] = Counter()
     truncated = 0
     total = 0
     for review_path in review_paths:
@@ -153,7 +178,8 @@ def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tup
             prediction_offsets = _latest_offsets(prediction_rows)
             review_offsets = _latest_offsets(review_rows)
             subset = review_path.stem[len(prefix):]
-            for offset in review_offsets.values():
+            # Sort by index so the capped evidence does not depend on worker completion order.
+            for _, offset in sorted(review_offsets.items()):
                 review_rows.seek(offset)
                 review = json.loads(review_rows.readline())
                 prediction_rows.seek(prediction_offsets[int(review['index'])])
@@ -162,22 +188,24 @@ def _samples(root: Path, model_id: str, benchmark: str, metric_name: str) -> tup
                 outcome = sample['answer']['outcome']
                 total += 1
                 truncated += is_truncated
-                # Keep deterministic evidence without uploading the full benchmark.
-                if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
-                    continue
-                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-                samples.append(sample)
+                if outcome_counts[outcome] < MAX_SAMPLES_PER_OUTCOME:
+                    outcome_counts[outcome] += 1
+                    samples.append(sample)
     return samples, truncated, total
 
 
-def _task_identity(benchmark: str, spec: Mapping[str, Any], identity: Mapping[str, Any],
-                   metadata: Mapping[str, Any]) -> dict[str, Any]:
+def _task_identity(
+    benchmark: str,
+    spec: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
     weight_sha256 = metadata['weight_sha256']
     wkv_mode = metadata['wkv_mode']
     split = spec.get('eval_split')
     field = metadata['benchmark_fields'][benchmark]
-    if not isinstance(field, str) or not field.strip():
-        raise ValueError(f'benchmark_fields[{benchmark!r}] must be a non-empty field name')
+    if not isinstance(field, str) or not FIELD_PATTERN.fullmatch(field):
+        raise ValueError(f'benchmark_fields[{benchmark!r}] must be a valid field slug')
     return {
         'identity': f'{weight_sha256}:{wkv_mode}:{benchmark}',
         'weight_sha256': weight_sha256,

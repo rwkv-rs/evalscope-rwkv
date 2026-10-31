@@ -70,7 +70,7 @@ uploaded again. HTTP failures propagate, leaving native artifacts or the legacy
 database unchanged for a retry. Neither path writes additional evidence files.
 
 Evidence is capped at 20 samples per outcome (`correct`, `incorrect`, `unanswered`,
-and native `undetermined`). Scores remain the full report scores;
+and native `undetermined`), taken in sample-index order. Scores remain the full report scores;
 `diagnostics.samples_total` and `diagnostics.truncation_rate` count all source
 samples, including those omitted from uploaded evidence. The frontend's sample
 list therefore contains representative evidence, not every evaluation record.

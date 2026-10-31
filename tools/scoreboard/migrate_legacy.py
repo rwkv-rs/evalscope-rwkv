@@ -11,6 +11,7 @@ import math
 import os
 import re
 import subprocess
+from collections import Counter
 from itertools import chain, groupby
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -20,7 +21,11 @@ from urllib.request import Request, urlopen
 SCHEMA_VERSION = 'scoreboard-v1'
 MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+# Keep these limits in sync with evalscope/utils/scoreboard.py; this tool stays
+# importable without loading EvalScope.
 MAX_SAMPLES_PER_OUTCOME = 20
+MAX_FAIL_REASON_CHARS = 2000
+FIELD_PATTERN = re.compile(r'[a-z][a-z0-9_-]{0,63}')
 
 MIGRATION_CONTRACT = {
     'name': 'legacy-evalscope-scoreboard',
@@ -328,6 +333,8 @@ def _output_fields(row: Mapping[str, Any]) -> tuple[str, str, int, float | None,
     message = choice.get('message') or {}
     score = (row.get('sample_score') or {}).get('score') or {}
     raw_value = message.get('tool_calls') or message.get('content')
+    if message.get('tool_calls') and message.get('content'):
+        raw_value = {'content': message['content'], 'tool_calls': message['tool_calls']}
     raw_completion = _text((score.get('prediction') or row.get('answer')) if raw_value is None else raw_value)
     stop_reason = str(choice.get('stop_reason') or (row.get('context_audit') or {}).get('finish_reason') or 'unknown')
     usage = output.get('usage') or {}
@@ -341,7 +348,7 @@ def _output_fields(row: Mapping[str, Any]) -> tuple[str, str, int, float | None,
 def _sample(
     sample_index: int,
     row: Mapping[str, Any],
-) -> tuple[dict[str, Any], bool, str]:
+) -> tuple[dict[str, Any], bool]:
     prompt_messages = list(row.get('messages') or [])
     # Keep assistant/tool history; only the final generated answer is not input.
     if prompt_messages and prompt_messages[-1].get('role') == 'assistant':
@@ -368,7 +375,7 @@ def _sample(
         'extracted_answer': _text(score.get('extracted_prediction') or row.get('answer')),
         'assembled_prompt': canonical_json(prompt_messages).decode('utf-8'),
         'raw_completion': raw_completion,
-        'fail_reason': _text(row.get('fail_reason')).strip()[:2000] or None,
+        'fail_reason': _text(row.get('fail_reason')).strip()[:MAX_FAIL_REASON_CHARS] or None,
         'generated_tokens': generated_tokens,
         'latency_ms': latency_ms,
     }
@@ -393,7 +400,7 @@ def _sample(
         },
         'answer': answer,
     }
-    return sample, stop_reason in {'max_tokens', 'model_length'}, outcome
+    return sample, stop_reason in {'max_tokens', 'model_length'}
 
 
 def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str], field: str) -> dict[str, Any]:
@@ -424,22 +431,25 @@ def _task_publication(
     field: str,
 ) -> dict[str, Any]:
     samples = []
-    outcome_counts: dict[str, int] = {}
+    outcome_counts: Counter[str] = Counter()
     truncated = 0
     evaluated = 0
     total = 0
     for row in rows:
-        sample, is_truncated, outcome = _sample(len(samples), row)
+        sample, is_truncated = _sample(len(samples), row)
+        outcome = sample['answer']['outcome']
         total += 1
         truncated += is_truncated
         evaluated += row.get('eval_id') is not None
-        if outcome_counts.get(outcome, 0) >= MAX_SAMPLES_PER_OUTCOME:
-            continue
-        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-        samples.append(sample)
-    # Legacy EvalScope stores its avg@1 result under the generic top-level
-    # ``score`` key. Publish the aggregation name expected by the Scoreboard.
-    metrics = {'avg@1': float(task['metrics']['score'])}
+        if outcome_counts[outcome] < MAX_SAMPLES_PER_OUTCOME:
+            outcome_counts[outcome] += 1
+            samples.append(sample)
+    # Legacy EvalScope stores its avg@1 result under the generic top-level ``score``
+    # key; other legacy values are counters and stay in ``diagnostics.legacy_metrics``.
+    score = (task['metrics'] or {}).get('score')
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise ValueError(f"legacy task {task['task_id']} has no finite 'score' metric")
+    metrics = {'avg@1': float(score)}
     return {
         'schema_version': SCHEMA_VERSION,
         'task': _task_identity(task, mapping, field),
@@ -493,7 +503,7 @@ def build_migration_bundle(
         raise ValueError(f"model map is missing: {', '.join(missing)}")
     for benchmark in {str(task['benchmark_name']) for task in tasks}:
         field = benchmark_fields.get(benchmark)
-        if not isinstance(field, str) or re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', field) is None:
+        if not isinstance(field, str) or not FIELD_PATTERN.fullmatch(field):
             raise ValueError(f'benchmark field map requires a valid field slug for {benchmark!r}')
     task_by_id = {int(task['task_id']): task for task in tasks}
 

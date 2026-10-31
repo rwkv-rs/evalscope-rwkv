@@ -143,33 +143,12 @@ def write_native_artifacts(root: Any, scores: list[float | None] | None = None) 
 
 
 def source_rows() -> list[dict[str, Any]]:
-    models = [
-        {
-            'kind': 'model',
-            'model_id': 1,
-            'model_name': 'rwkv7-g1h-1.5b',
-            'arch_version': 'rwkv7',
-            'data_version': 'g1h',
-            'num_params': '1_5b',
-        },
-        {
-            'kind': 'model',
-            'model_id': 2,
-            'model_name': 'rwkv7-g1i-1.5b',
-            'arch_version': 'rwkv7',
-            'data_version': 'g1i',
-            'num_params': '1_5b',
-        },
-    ]
     task = {
         'kind': 'task',
         'task_id': 42,
         'score_id': 7,
         'model_id': 1,
         'model_name': 'rwkv7-g1h-1.5b',
-        'arch_version': 'rwkv7',
-        'data_version': 'g1h',
-        'num_params': '1_5b',
         'benchmark_id': 3,
         'benchmark_name': 'bfcl_v4',
         'benchmark_split': 'test',
@@ -231,7 +210,7 @@ def source_rows() -> list[dict[str, Any]]:
         'is_passed': None,
         'fail_reason': 'no_answer',
     }
-    return [*models, task, sample, unanswered]
+    return [task, sample, unanswered]
 
 
 class Response:
@@ -317,13 +296,13 @@ def test_native_callback_checks_scoreboard_request_limits(tmp_path: Any, monkeyp
         publish_benchmark_callback(str(tmp_path), model_id, benchmark, str(metadata_path))
 
 
-@pytest.mark.parametrize('module_name', ['evalscope.utils.scoreboard', 'tools.scoreboard.migrate_legacy'])
-def test_upload_caps_match_scoreboard_pr6(module_name: str) -> None:
-    from importlib import import_module
+def test_migration_limits_match_native_uploader() -> None:
+    from evalscope.utils import scoreboard
+    from tools.scoreboard import migrate_legacy
 
-    uploader = import_module(module_name)
-    assert uploader.MAX_COMPRESSED_BYTES == 128 * 1024 * 1024
-    assert uploader.MAX_UNCOMPRESSED_BYTES == 512 * 1024 * 1024
+    for name in ('MAX_COMPRESSED_BYTES', 'MAX_UNCOMPRESSED_BYTES', 'MAX_SAMPLES_PER_OUTCOME', 'MAX_FAIL_REASON_CHARS'):
+        assert getattr(migrate_legacy, name) == getattr(scoreboard, name)
+    assert migrate_legacy.FIELD_PATTERN.pattern == scoreboard.FIELD_PATTERN.pattern
 
 
 def test_native_truncation_counts_all_samples_and_pairs_unordered_rows(tmp_path: Any, monkeypatch: Any) -> None:
@@ -336,6 +315,10 @@ def test_native_truncation_counts_all_samples_and_pairs_unordered_rows(tmp_path:
         row['model_output']['choices'][0]['message'] = {'content': f'raw output {index}'}
     rows[-1]['model_output']['choices'][0]['stop_reason'] = 'max_tokens'
     prediction_path.write_text(''.join(f'{json.dumps(row)}\n' for row in reversed(rows)), encoding='utf-8')
+    # Reviews are also written in completion order; capped evidence must follow sample index.
+    review_path = tmp_path / 'reviews' / model_id / f'{benchmark}_default.jsonl'
+    reviews = review_path.read_text().splitlines()
+    review_path.write_text(''.join(f'{line}\n' for line in reversed(reviews)), encoding='utf-8')
     requests = []
 
     def send(*args: Any) -> tuple[int, dict[str, Any]]:
@@ -394,13 +377,13 @@ def test_native_retry_keeps_only_latest_prediction_and_review(tmp_path: Any) -> 
     assert samples[0]['answer']['raw_completion'] == '[{"function":{"arguments":"{}","name":"weather"}}]'
 
 
-@pytest.mark.parametrize('field', [None, '', [], 42])
+@pytest.mark.parametrize('field', [None, '', [], 42, 'Tool Use'])
 def test_native_requires_explicit_benchmark_field(tmp_path: Any, field: Any) -> None:
     model_id, benchmark, metadata_path = write_native_artifacts(tmp_path)
     metadata = json.loads(metadata_path.read_text())
     metadata['benchmark_fields'][benchmark] = field
     metadata_path.write_text(json.dumps(metadata), encoding='utf-8')
-    with pytest.raises(ValueError, match='must be a non-empty field name'):
+    with pytest.raises(ValueError, match='must be a valid field slug'):
         publish_benchmark_callback(str(tmp_path), model_id, benchmark, str(metadata_path))
 
 
@@ -596,7 +579,7 @@ def test_migration_limits_evidence_per_outcome() -> None:
     samples = [*correct_samples, *incorrect_samples, *unanswered_samples]
     samples[-1] = deepcopy(samples[-1])
     samples[-1]['model_output']['choices'][0]['stop_reason'] = 'model_length'
-    _campaign, publications = build_migration_bundle([*rows[:3], *samples], MODEL_MAP, BENCHMARK_FIELDS)
+    _campaign, publications = build_migration_bundle([rows[0], *samples], MODEL_MAP, BENCHMARK_FIELDS)
     publication = next(iter(publications))
 
     assert [sample['sample_index'] for sample in publication['samples']] == list(range(60))
@@ -625,7 +608,7 @@ def test_migration_keeps_answers_without_a_paired_model_and_preserves_tool_histo
     sample['messages'] = [*history, {'role': 'assistant', 'content': 'final answer'}]
     tool_calls = [{'function': {'name': 'book_travel', 'arguments': '{"city":"Shanghai"}'}}]
     sample['model_output']['choices'][0]['message'] = {'content': '', 'tool_calls': tool_calls}
-    campaign, publications = build_migration_bundle(rows[2:], MODEL_MAP, {'bfcl_v4': 'custom-agent-domain'})
+    campaign, publications = build_migration_bundle(rows, MODEL_MAP, {'bfcl_v4': 'custom-agent-domain'})
     publication = next(iter(publications))
     assert campaign['expected_tasks'] == [publication['task']]
     assert publication['task']['field'] == 'custom-agent-domain'
@@ -636,6 +619,24 @@ def test_migration_keeps_answers_without_a_paired_model_and_preserves_tool_histo
     assert 'comparison' not in publication
 
 
+def test_migration_preserves_text_alongside_tool_calls() -> None:
+    rows = source_rows()
+    message = {'content': 'Checking.', 'tool_calls': [{'function': {'name': 'weather', 'arguments': '{}'}}]}
+    rows[1]['model_output']['choices'][0]['message'] = message
+    _campaign, publications = build_migration_bundle(rows, MODEL_MAP, BENCHMARK_FIELDS)
+    answer = next(iter(publications))['samples'][0]['answer']
+    assert json.loads(answer['raw_completion']) == message
+
+
+@pytest.mark.parametrize('metrics', [{}, {'score': None}, {'score': float('nan')}, {'score': True}])
+def test_migration_requires_finite_legacy_score(metrics: dict[str, Any]) -> None:
+    rows = source_rows()
+    rows[0]['metrics'] = metrics
+    _campaign, publications = build_migration_bundle(rows, MODEL_MAP, BENCHMARK_FIELDS)
+    with pytest.raises(ValueError, match="no finite 'score' metric"):
+        next(iter(publications))
+
+
 @pytest.mark.parametrize('fields', [{}, {'bfcl_v4': ''}, {'bfcl_v4': 'Tool Use'}, {'bfcl_v4': ['tool-use']}])
 def test_migration_rejects_missing_or_invalid_fields(fields: Any) -> None:
     with pytest.raises(ValueError, match='valid field slug'):
@@ -643,7 +644,7 @@ def test_migration_rejects_missing_or_invalid_fields(fields: Any) -> None:
 
 
 def test_migration_keeps_distinct_configs_and_moves_source_ids_to_diagnostics() -> None:
-    task = source_rows()[2]
+    task = source_rows()[0]
     second = {**task, 'task_id': 43, 'score_id': 8, 'cot_mode': 'cot', 'sampling_config': {'temperature': 0.5}}
     campaign, publications = build_migration_bundle([task, second], MODEL_MAP, BENCHMARK_FIELDS)
     first, second = publications
@@ -667,9 +668,9 @@ def test_bundle_is_streamed_and_requires_every_model_mapping() -> None:
             yield row
 
     _campaign, publications = build_migration_bundle(rows(), MODEL_MAP, BENCHMARK_FIELDS)
-    assert consumed == ['model', 'model', 'task', 'sample']
+    assert consumed == ['task', 'sample']
     assert len(next(iter(publications))['samples']) == 2
-    assert consumed == ['model', 'model', 'task', 'sample', 'sample']
+    assert consumed == ['task', 'sample', 'sample']
 
     with pytest.raises(ValueError, match='model map is missing: rwkv7-g1h-1.5b'):
         build_migration_bundle(source_rows(), {}, BENCHMARK_FIELDS)
