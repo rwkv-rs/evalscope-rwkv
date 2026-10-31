@@ -111,17 +111,70 @@ def test_bigcodebench_rejects_empty_test_data(make_adapter: Callable[..., Any], 
         adapter.match_score('', 'def answer(): return 42', '', state)
 
 
-@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard'])
+def mbpp_state() -> SimpleNamespace:
+    return SimpleNamespace(metadata={
+        'task_id': 'synthetic', 'test_imports': ['from math import isclose'],
+        'test_list': ['assert square(1) == 1'],
+        'test': 'for x in [1, 2, 3]:\n    assert isclose(square(x), x * x)',
+    })
+
+
+@pytest.mark.parametrize(('solution', 'passed'), [
+    ('def square(x): return x * x', True),
+    ('def square(x): return x', False),
+    ('def square(x): raise RuntimeError("broken candidate")', False),
+    ('def square(:', False),
+    ('raise SystemExit(0)', False),
+    ('import os; os._exit(0)', False),
+    ('print("candidate output", end="");\ndef square(x): return x * x', True),
+])
+def test_mbpp_plus_runs_expanded_tests(make_adapter: Callable[..., Any], solution: str, passed: bool) -> None:
+    adapter = make_adapter('mbpp_plus', review_timeout=120)
+    score = adapter.match_score('original response', solution, '', mbpp_state())
+    assert score.value == {'acc': passed}
+    assert score.prediction == 'original response'
+    assert score.extracted_prediction == solution
+    assert score.metadata['timeout'] == 120
+    assert score.metadata['scorer_protocol'] == 'full-expanded-tests-v1'
+
+
+def test_mbpp_plus_keeps_prompt_examples_and_supports_string_imports(make_adapter: Callable[..., Any]) -> None:
+    adapter = make_adapter('mbpp_plus')
+    record = dict(mbpp_state().metadata, prompt='Return the square.', code='def square(x): return x * x', source_file='test')
+    record['test_imports'] = 'from math import isclose'
+    sample = adapter.record_to_sample(record)
+    prompt = adapter.format_prompt_template(sample)
+    assert 'assert square(1) == 1' in prompt
+    assert record['test'] not in prompt
+    state = SimpleNamespace(metadata=sample.metadata)
+    assert adapter.match_score('', record['code'], record['code'], state).value == {'acc': True}
+
+
+@pytest.mark.parametrize('test', ['', '# no checks', 'def check():\n    assert False'])
+def test_mbpp_plus_does_not_fall_back_to_prompt_tests(make_adapter: Callable[..., Any], test: str) -> None:
+    adapter = make_adapter('mbpp_plus')
+    state = mbpp_state()
+    state.metadata['test'] = test
+    with pytest.raises(ValueError, match='no executable checks'):
+        adapter.match_score('', 'def square(x): return x', '', state)
+
+
+@pytest.mark.parametrize('name', ['mbpp_plus', 'bigcodebench', 'bigcodebench_hard'])
 def test_success_status_without_completion_marker_is_not_a_pass(
     make_adapter: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, name: str,
 ) -> None:
-    adapter = make_adapter(name, extra_params={'calibrate': False})
+    options = {} if name == 'mbpp_plus' else {'extra_params': {'calibrate': False}}
+    adapter = make_adapter(name, **options)
     monkeypatch.setattr(adapter, 'execute_code_in_sandbox', lambda **kwargs: {'status': 'success', 'output': ''})
-    state = SimpleNamespace(metadata={'task_id': 'x', 'test': BCB_TEST})
+    state = mbpp_state() if name == 'mbpp_plus' else SimpleNamespace(metadata={'task_id': 'x', 'test': BCB_TEST})
     assert adapter.match_score('', 'pass', '', state).value == {'acc': False}
 
 
 def test_coding_image_specs(make_adapter: Callable[..., Any], tmp_path: Path) -> None:
+    mbpp = make_adapter('mbpp_plus').get_sandbox_image_spec()
+    humaneval = make_adapter('humaneval_plus').get_sandbox_image_spec()
+    assert mbpp == humaneval
+    assert 'numpy' in Path(mbpp.dockerfile).read_text()
     bcb = make_adapter('bigcodebench').get_sandbox_image_spec()
     dockerfile = Path(bcb.context_dir, bcb.dockerfile).read_text()
     assert 'ENTRYPOINT []' in dockerfile
@@ -134,7 +187,7 @@ def test_coding_image_specs(make_adapter: Callable[..., Any], tmp_path: Path) ->
     assert custom.force_rebuild
 
 
-@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard'])
+@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard', 'mbpp_plus'])
 def test_explicit_sandbox_images_are_preserved(make_adapter: Callable[..., Any], name: str) -> None:
     adapter = make_adapter(name, sandbox_config={'image': 'custom-image:latest'})
     assert adapter.get_sandbox_image_spec() is None
@@ -143,6 +196,6 @@ def test_explicit_sandbox_images_are_preserved(make_adapter: Callable[..., Any],
     assert adapter.get_sandbox_image_spec() is None
 
 
-@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard'])
+@pytest.mark.parametrize('name', ['bigcodebench', 'bigcodebench_hard', 'mbpp_plus'])
 def test_changed_scoring_has_new_evaluation_version(make_adapter: Callable[..., Any], name: str) -> None:
     assert make_adapter(name).benchmark_meta.evaluation_version == 'v1.1'
