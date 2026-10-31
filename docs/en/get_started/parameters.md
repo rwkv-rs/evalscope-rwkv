@@ -266,6 +266,7 @@ For full usage, examples and Trace visualization, see [Agent Evaluation](../user
 | `--use-cache` | `str` | Reuse local cache path (e.g., `outputs/20241210_194434`)<br>Reuses inference and evaluation results | `None` |
 | `--rerun-review` | `bool` | Used with `--use-cache`: re-runs review/scoring from cached predictions and atomically replaces the review cache after success | `false` |
 | `--enable-progress-tracker` | `bool` | Whether to enable progress tracking, writing hierarchical evaluation progress to `progress.json` in real time, queryable via the service API | `false` |
+| `--html-report` | `bool` | Generate the standalone interactive HTML report. Use `--no-html-report` to keep JSON/JSONL reports only | `true` |
 | `--collect-perf` | `bool` | Collect per-request performance metrics (latency, TTFT, token usage) and write them into the evaluation report. TTFT requires `--generation-config stream=true`. Use `--no-collect-perf` to disable | `true` |
 | `--seed` | `int` | Random seed | `42` |
 | `--debug` | `bool` | Whether to enable debug mode | `false` |
