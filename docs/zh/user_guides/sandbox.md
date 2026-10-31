@@ -51,6 +51,22 @@ TaskConfig(
 )
 ```
 
+### Coding 评分版本
+
+以下原生适配器使用评分版本 `v1.1`：
+
+| 测评集 | 评分行为 |
+|--------|----------|
+| `bigcodebench`、`bigcodebench_hard` | 显式发现并运行数据集中的 `unittest.TestCase` 测试类。非空测试套件全部通过后，还必须输出本次执行的完成标记。仅定义测试类或提前退出不会通过。 |
+| `mbpp_plus` | 执行 `test_imports` 和完整的扩展 `test` 程序。`test_list` 仍用于提示词，不再作为评分测试集。完成标记用于确认程序确实执行到了测试末尾。 |
+| `scicode` | 使用共享代码解析器提取第一个 Python 代码块，排除围栏外的说明文字和 Markdown 标记。 |
+
+本地 Docker 会基于 BigCodeBench 的依赖镜像构建一个清除了单次评测入口的镜像，使沙箱池能够持续运行。原有 `docker_build_context`、`dockerfile` 和 `force_rebuild` 扩展参数仍可用于自定义构建。MBPP+ 复用 HumanEval+ 的 NumPy 镜像。远程或非 Docker 环境需提供对应依赖及适合执行代码的沙箱。
+
+超时仍由 `dataset_args` 配置；例如，扩展测试需要更多时间时，可设置 `{'mbpp_plus': {'review_timeout': 120}}`，默认值仍为 20 秒。这些修复不添加特定题目的断言或网络资源替代，也不更改提示词和采样配置。
+
+`v1.0` 的分数及缓存判定与 `v1.1` 不等价。新测评使用新的输出目录。如需有意重评已保存答案，使用 `--use-cache <old-run> --rerun-review`；EvalScope 会把旧评分身份记录为缓存来源。显式重评前请保留历史产物。
+
 ## 1. 本地使用
 
 使用Docker在本地机器上搭建沙箱环境，并在本地进行评测，需本地机器支持Docker

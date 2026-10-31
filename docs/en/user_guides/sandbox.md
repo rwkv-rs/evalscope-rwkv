@@ -51,6 +51,22 @@ TaskConfig(
 )
 ```
 
+### Coding scorer versions
+
+The following native adapters use evaluation version `v1.1`:
+
+| Benchmark | Scoring behavior |
+|-----------|------------------|
+| `bigcodebench`, `bigcodebench_hard` | Explicitly discover and execute the dataset's `unittest.TestCase` classes. A successful process must also emit a per-execution completion marker after a nonempty, successful suite. Merely defining the tests or exiting early does not pass. |
+| `mbpp_plus` | Execute `test_imports` and the complete expanded `test` program. `test_list` remains in the prompt; it is no longer the scoring suite. A completion marker confirms that execution reached the end of the tests. |
+| `scicode` | Extract the first Python code block with the shared code parser, excluding surrounding prose and Markdown fences. |
+
+Local Docker execution builds a BigCodeBench dependency image with its one-shot entrypoint cleared so that sandbox pools can keep it running. The existing `docker_build_context`, `dockerfile`, and `force_rebuild` extra parameters still support a custom build. MBPP+ reuses HumanEval+'s NumPy image. Remote/non-Docker environments must provide the corresponding dependencies and a suitable running sandbox.
+
+Timeouts remain configurable through `dataset_args`; for example, set `{'mbpp_plus': {'review_timeout': 120}}` when expanded tests need more time than the unchanged 20-second default. These fixes do not add task-specific assertions, network fixtures, or change prompts and sampling.
+
+Scores and cached reviews from `v1.0` are not equivalent to `v1.1`. Use a fresh output directory for new evaluations. To intentionally regrade saved answers, use `--use-cache <old-run> --rerun-review`; EvalScope records the old evaluation identity as the cache source. Keep historical artifacts before explicitly rescoring them.
+
 ## 1. Local Usage
 
 Use Docker to set up a sandbox environment on a local machine and conduct evaluation locally, requiring Docker support on the local machine.
