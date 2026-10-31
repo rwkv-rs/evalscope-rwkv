@@ -138,6 +138,7 @@ Resources: [Paper](https://arxiv.org/abs/2511.07685) |
 @register_benchmark(
     BenchmarkMeta(
         name='researchrubrics',
+        evaluation_version='v1.1',
         pretty_name='ResearchRubrics',
         tags=[Tags.AGENT, Tags.MULTI_TURN, Tags.RETRIEVAL, Tags.REASONING],
         description=_DESCRIPTION,
@@ -216,7 +217,8 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
     ) -> List[SampleScore]:
         if not task_states:
             return sample_scores
-        self.llm_judge  # Initialize once before worker threads access it.
+        if any(state.output.completion.strip() for state in task_states):
+            self.llm_judge  # Initialize once before worker threads access it.
         workers = min(max(int(self._task_config.eval_batch_size), 1), len(task_states))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             reviewed_scores = list(executor.map(self._score_task_state, task_states))
@@ -256,8 +258,10 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
 
     def _score_task_state(self, task_state: TaskState) -> Score:
         report = task_state.output.completion or ''
-        if not report.strip():
-            raise ValueError(f'ResearchRubrics sample {task_state.metadata.get("sample_id")} produced an empty report.')
+        if not report.strip() and (task_state.output.error or task_state.output.empty):
+            raise ValueError(
+                f'ResearchRubrics sample {task_state.metadata.get("sample_id")} has no usable model output.'
+            )
         try:
             rubrics = json.loads(task_state.target)
         except json.JSONDecodeError as exc:
@@ -307,8 +311,29 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
         return chunks
 
     def judge_definition(self, context: JudgeContext) -> JudgeDefinition:
+        cases = self._build_cases(context)
+        if not context.filtered_prediction.strip():
+            entries = [{'score': 0.0, **case.metadata} for case in cases]
+            return JudgeDefinition.skip(
+                Score(
+                    prediction=context.original_prediction,
+                    extracted_prediction=context.filtered_prediction,
+                    value=self._rubric_values(entries),
+                    main_score_name='compliance_score',
+                    explanation='Empty research report receives zero rubric compliance.',
+                    metadata={
+                        'source': 'researchrubrics_empty_report',
+                        'grading_mode': 'rule',
+                        'empty_report': True,
+                        'rubric_count': len(cases),
+                        'used_chunking': False,
+                        'sample_id': context.task_state.metadata.get('sample_id') or context.task_state.sample_id,
+                    },
+                ),
+                reason='empty_report',
+            )
         return JudgeDefinition.workflow(
-            cases=self._build_cases(context),
+            cases=cases,
             request=self._build_request,
             reduce=self._reduce_verdicts,
             main_score_name='compliance_score',
@@ -455,18 +480,8 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
                 'axis': str(rubric.get('axis', '')).strip(),
             }
 
-        entries = list(rubric_scores.values())
-        compliance = self._weighted_compliance(entries)
-        values: Dict[str, float] = {'compliance_score': compliance}
-        axis_entries: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for entry in entries:
-            axis_entries[entry['axis']].append(entry)
-        for axis, axis_list in axis_entries.items():
-            if any(e['weight'] > 0 for e in axis_list):
-                values[f'axis/{axis}'] = self._weighted_compliance(axis_list)
-
         return ReducedVerdict(
-            value=values,
+            value=self._rubric_values(list(rubric_scores.values())),
             metadata={
                 'source': 'researchrubrics_binary_judge',
                 'grading_mode': 'binary',
@@ -478,6 +493,16 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
     def _finalize_score(self, score: Score, review, context) -> Score:
         score.explanation = f'Binary rubric compliance across {len(json.loads(context.reference))} criteria.'
         return score
+
+    def _rubric_values(self, entries: List[Dict[str, Any]]) -> Dict[str, float]:
+        values = {'compliance_score': self._weighted_compliance(entries)}
+        axis_entries: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for entry in entries:
+            axis_entries[entry['axis']].append(entry)
+        for axis, axis_list in axis_entries.items():
+            if any(e['weight'] > 0 for e in axis_list):
+                values[f'axis/{axis}'] = self._weighted_compliance(axis_list)
+        return values
 
     @staticmethod
     def _weighted_compliance(entries: List[Dict[str, Any]]) -> float:
