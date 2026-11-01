@@ -276,7 +276,7 @@ class CacheManager:
         return model_result
 
     def filter_review_cache(
-        self, subset: str, task_states: List[TaskState]
+        self, subset: str, task_states: List[TaskState], cache_file: Optional[str] = None
     ) -> Tuple[List[SampleScore], List[TaskState]]:
         """
         Load cached review results and filter corresponding task states.
@@ -291,7 +291,7 @@ class CacheManager:
         Returns:
             Tuple of (cached sample scores, filtered task states for remaining reviews)
         """
-        cache_file = self.get_review_cache_path(subset)
+        cache_file = cache_file or self.get_review_cache_path(subset)
         if not os.path.exists(cache_file):
             # No review cache exists, return empty scores and all task states
             return [], task_states
@@ -357,15 +357,47 @@ class CacheManager:
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
         return file_path
 
-    def delete_review_cache(self, subset: str):
-        """Start a transactional review rerun without touching the previous review file."""
+    def delete_review_cache(self, subset: str, resume: Optional[str] = None) -> str:
+        """Start a transactional review rerun without touching the previous review file.
+
+        Args:
+            subset: Name of the dataset subset.
+            resume: A staged rerun file kept by a failed earlier attempt of the same run. Its
+                completed reviews stay valid (they are bound to prediction ids) and are resumed.
+
+        Returns:
+            Path of the staged review file.
+        """
         file_path = self.get_review_cache_path(subset)
-        temporary = f'{file_path}.rerun-{uuid.uuid4().hex}'
-        # A tolerated scoring failure must publish an empty cache, not retain old scores.
-        with open(temporary, 'x', encoding='utf-8'):
-            pass
+        if resume is not None and os.path.exists(resume):
+            temporary = resume
+            logger.info(f'Resuming staged review rerun: {temporary}')
+        else:
+            temporary = f'{file_path}.rerun-{uuid.uuid4().hex}'
+            # A tolerated scoring failure must publish an empty cache, not retain old scores.
+            with open(temporary, 'x', encoding='utf-8'):
+                pass
+            logger.debug(f'Rescoring reviews into temporary cache: {temporary}')
         self._review_reruns[file_path] = temporary
-        logger.debug(f'Rescoring reviews into temporary cache: {temporary}')
+        return temporary
+
+    def suspend_review_reruns(self) -> Dict[str, str]:
+        """Close staged review reruns without publishing or deleting them, for a later attempt."""
+        with self._write_lock:
+            for temporary in self._review_reruns.values():
+                writer = self._writers.pop(temporary, None)
+                if writer is not None:
+                    writer.close()
+            suspended = dict(self._review_reruns)
+            self._review_reruns.clear()
+        return suspended
+
+    @staticmethod
+    def remove_staged_reviews(staged: Dict[str, str]) -> None:
+        """Delete staged review files that will not be resumed."""
+        for temporary in staged.values():
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def commit_review_reruns(self) -> None:
         """Atomically publish every fully written review rerun."""

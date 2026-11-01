@@ -1,5 +1,5 @@
 import abc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict
 
 from evalscope.report import Report
 
@@ -23,6 +23,15 @@ class Evaluator(abc.ABC):
 
     has_retryable_errors: bool = False
     """Set when an attempt left failures that ``--eval-retries`` may recover."""
+
+    keep_review_reruns_on_failure: bool = False
+    """Keep staged review reruns of a failed attempt so a retry can resume them."""
+
+    resume_review_reruns: Dict[str, str] = {}
+    """Staged review reruns kept by a failed earlier attempt, keyed by review cache path."""
+
+    suspended_review_reruns: Dict[str, str] = {}
+    """Staged review reruns this attempt kept after failing."""
 
     def __init__(
         self,

@@ -153,37 +153,51 @@ def _evaluate_with_retries(
     outputs: OutputsStructure,
 ) -> Union[dict, 'Report']:
     """Retry only this benchmark, with fresh runtime state and durable sample caches."""
+    from evalscope.api.evaluator import CacheManager
     from evalscope.api.registry import create_evaluator, get_benchmark
 
     retries = task_config.eval_retries
-    for attempt in range(retries + 1):
-        if attempt:
-            delay = min(60, 5 * 2**(attempt - 1))
-            logger.warning(
-                f'{evaluator.benchmark_name}: retry {attempt}/{retries} in {delay}s, '
-                f'resuming from {outputs.outputs_dir}'
-            )
-            time.sleep(delay)
-            retry_config = task_config.model_copy(update={'use_cache': outputs.outputs_dir})
-            if retry_config.seed is not None:
-                seed_everything(retry_config.seed)
-            benchmark = get_benchmark(evaluator.benchmark_name, retry_config)
-            benchmark.validate_judge_strategy()
-            evaluator = create_evaluator(
-                benchmark=benchmark, model=evaluator.model, outputs=outputs, task_config=retry_config
-            )
-        try:
-            report = evaluator.eval()
-        except Exception:
-            if attempt == retries:
-                raise
-            logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} failed', exc_info=True)
-            continue
-        summary = getattr(report, 'execution_summary', None)
-        failed = evaluator.has_retryable_errors or (summary is not None and summary.errored > 0)
-        if not retries or not failed:
-            return report
-        logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} finished with execution failures')
+    # A rerun committed by a finished attempt is not repeated; one staged by a failed attempt is resumed.
+    rerun_review = task_config.rerun_review
+    staged_reviews: Dict[str, str] = {}
+    try:
+        for attempt in range(retries + 1):
+            if attempt:
+                delay = min(60, 5 * 2**(attempt - 1))
+                logger.warning(
+                    f'{evaluator.benchmark_name}: retry {attempt}/{retries} in {delay}s, '
+                    f'resuming from {outputs.outputs_dir}'
+                )
+                time.sleep(delay)
+                retry_config = task_config.model_copy(
+                    update={'use_cache': outputs.outputs_dir, 'rerun_review': rerun_review}
+                )
+                if retry_config.seed is not None:
+                    seed_everything(retry_config.seed)
+                benchmark = get_benchmark(evaluator.benchmark_name, retry_config)
+                benchmark.validate_judge_strategy()
+                evaluator = create_evaluator(
+                    benchmark=benchmark, model=evaluator.model, outputs=outputs, task_config=retry_config
+                )
+            evaluator.resume_review_reruns, staged_reviews = staged_reviews, {}
+            evaluator.keep_review_reruns_on_failure = attempt < retries
+            try:
+                report = evaluator.eval()
+            except Exception:
+                staged_reviews = getattr(evaluator, 'suspended_review_reruns', {})
+                if attempt == retries:
+                    raise
+                logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} failed', exc_info=True)
+                continue
+            rerun_review = False
+            summary = getattr(report, 'execution_summary', None)
+            failed = evaluator.has_retryable_errors or (summary is not None and summary.errored > 0)
+            if not retries or not failed:
+                return report
+            logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} finished with execution failures')
+    finally:
+        # Staged reruns not handed to a later attempt are abandoned; the original reviews stay intact.
+        CacheManager.remove_staged_reviews(staged_reviews)
     # An exhausted partial attempt must not be published as a completed benchmark.
     raise RuntimeError(f'{evaluator.benchmark_name}: execution failures remain; cache: {outputs.outputs_dir}')
 

@@ -242,8 +242,11 @@ class DefaultEvaluator(Evaluator):
 
             logger.info(f'Benchmark {self.benchmark_name} evaluation finished.')
             return report
-        except BaseException:
-            self.cache_manager.discard_review_reruns()
+        except BaseException as exc:
+            if self.keep_review_reruns_on_failure and isinstance(exc, Exception):
+                self.suspended_review_reruns = self.cache_manager.suspend_review_reruns()
+            else:
+                self.cache_manager.discard_review_reruns()
             raise
         finally:
             self.finalize()
@@ -283,12 +286,17 @@ class DefaultEvaluator(Evaluator):
                 for task_state in cached_pred_states:
                     self._record_perf(task_state)
             reuse_reviews = self.use_cache and not self.task_config.rerun_review
+            review_source = self.cache_manager.get_review_cache_path(subset) if reuse_reviews else None
             # ``delete_review_cache`` stages a transactional rewrite. Without an existing
             # review file, write reviews directly so each one is a durable checkpoint.
             if not reuse_reviews and (
                 self.task_config.rerun_review or os.path.exists(self.cache_manager.get_review_cache_path(subset))
             ):
-                self.cache_manager.delete_review_cache(subset)
+                resume = self.resume_review_reruns.get(self.cache_manager.get_review_cache_path(subset))
+                staged = self.cache_manager.delete_review_cache(subset, resume=resume)
+                if self.use_cache and staged == resume:
+                    # Reviews completed by the failed attempt are bound to their predictions.
+                    review_source = staged
 
             if self.benchmark.use_batch_scoring:
                 # Prediction runs in the pool; review is deferred until all
@@ -296,8 +304,10 @@ class DefaultEvaluator(Evaluator):
                 for sample in remaining_dataset:
                     work_items.append(_WorkItem(subset=subset, sample=sample))
 
-                if reuse_reviews:
-                    cached_scores, need_review = self.cache_manager.filter_review_cache(subset, cached_pred_states)
+                if review_source is not None:
+                    cached_scores, need_review = self.cache_manager.filter_review_cache(
+                        subset, cached_pred_states, cache_file=review_source
+                    )
                     cached_scores_by_subset[subset].extend(cached_scores)
                     review_pending_by_subset[subset].extend(need_review)
                 else:
@@ -305,8 +315,10 @@ class DefaultEvaluator(Evaluator):
 
             else:
                 # Predict + review happen atomically per sample inside the pool.
-                if reuse_reviews:
-                    cached_scores, need_review = self.cache_manager.filter_review_cache(subset, cached_pred_states)
+                if review_source is not None:
+                    cached_scores, need_review = self.cache_manager.filter_review_cache(
+                        subset, cached_pred_states, cache_file=review_source
+                    )
                     cached_scores_by_subset[subset].extend(cached_scores)
                     for ts in need_review:  # Tier 2: review-only items
                         work_items.append(_WorkItem(subset=subset, task_state=ts))

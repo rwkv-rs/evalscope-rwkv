@@ -105,3 +105,51 @@ def test_native_retry_exhaustion_keeps_progress_and_never_publishes(
     review_path = tmp_path / 'run/reviews/mock-recovery/general_mcq_example.jsonl'
     assert sorted(json.loads(line)['index'] for line in review_path.read_text().splitlines()) == [0, 2]
     publish.assert_not_called()
+
+
+@pytest.mark.parametrize('failure', ['exception', 'judge_transport'])
+def test_rerun_review_retry_resumes_completed_reviews(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    """Finding 10: a failed --rerun-review attempt must not re-run completed judge requests."""
+    config = _config(tmp_path, ignore_errors=failure == 'judge_transport')
+    config.eval_batch_size = 1
+    config.eval_retries = 0
+    run_task(config)  # populate predictions and reviews
+    review_path = tmp_path / 'run/reviews/mock-recovery/general_mcq_example.jsonl'
+    original_reviews = review_path.read_text()
+    publish = _publisher(monkeypatch)
+    predictions: Counter[int] = Counter()
+    reviews: Counter[int] = Counter()
+    infer = GeneralMCQAdapter.run_inference
+    review = GeneralMCQAdapter.calculate_metrics
+
+    def counted_prediction(self: GeneralMCQAdapter, model: Model, sample: Sample, **kwargs: object) -> TaskState:
+        predictions[sample.id] += 1
+        return infer(self, model=model, sample=sample, **kwargs)
+
+    def flaky_review(self: GeneralMCQAdapter, task_state: TaskState) -> SampleScore:
+        index = task_state.sample_id
+        reviews[index] += 1
+        if index == 1 and reviews[1] == 1:
+            if failure == 'exception':
+                assert review_path.read_text() == original_reviews  # staged, not yet published
+                raise ConnectionError('judge temporarily unavailable')
+            result = review(self, task_state)
+            result.score.value = {}
+            result.score.status = ScoreStatus.EXCLUDED
+            result.score.judge_summary = JudgeSummary(status=ScoreStatus.EXCLUDED, failures={'transport_error': 1})
+            return result
+        return review(self, task_state)
+
+    monkeypatch.setattr(GeneralMCQAdapter, 'run_inference', counted_prediction)
+    monkeypatch.setattr(GeneralMCQAdapter, 'calculate_metrics', flaky_review)
+    rerun = config.model_copy(update={'use_cache': config.work_dir, 'rerun_review': True, 'eval_retries': 1})
+    report = run_task(rerun)['general_mcq']
+
+    assert report.execution_summary.errored == 0
+    assert predictions == {}
+    assert reviews == {0: 1, 1: 2, 2: 1}
+    assert {json.loads(line)['index'] for line in review_path.read_text().splitlines()} == {0, 1, 2}
+    assert not list(review_path.parent.glob('*.rerun-*'))
+    publish.assert_called_once()
