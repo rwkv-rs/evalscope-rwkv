@@ -285,3 +285,50 @@ def test_answers_without_reasoning_tags_are_unchanged(make_adapter: Callable[...
     result = make_adapter('humaneval').calculate_metrics(_humaneval_state(CORRECT, 'stop')).score
     assert result.value == {'acc': True}
     assert 'reasoning_boundary' not in result.metadata
+
+
+@pytest.mark.parametrize('name', ['bigcodebench', 'mbpp_plus', 'humaneval_plus'])
+@pytest.mark.parametrize('manager_config', [{'base_url': 'http://sandbox.example:8000'}, {'manager_type': 'http'}])
+def test_remote_sandbox_never_builds_locally(
+    monkeypatch: pytest.MonkeyPatch, name: str, manager_config: dict[str, Any],
+) -> None:
+    """Finding 5: a Docker-less client must reach the remote manager with the remote image tag."""
+    from evalscope.api.mixin import code_execution_sandbox_mixin as mixin
+    from evalscope.api.sandbox import DockerImageBuilder
+
+    def no_local_docker(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError('local Docker must not be used with a remote sandbox manager')
+
+    acquired: dict[str, Any] = {}
+
+    def acquire(**kwargs: Any) -> object:
+        acquired.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(mixin, 'prepare_docker_image', no_local_docker)
+    monkeypatch.setattr(mixin, 'build_and_acquire_pool_sync', acquire)
+    config = TaskConfig(model='offline-test', eval_type='mock_llm', datasets=[name])
+    config.sandbox.enabled = True
+    config.sandbox.manager_config = manager_config
+    adapter = get_benchmark(name, config)
+    backend = mixin.EnclaveCodeExecutionBackend(adapter.benchmark_meta, config, adapter.get_sandbox_image_spec)
+    backend.start()
+
+    expected = DockerImageBuilder().resolve(adapter.get_sandbox_image_spec()).image_tag
+    assert acquired['manager_config'] == manager_config
+    assert acquired['sandbox_config_dict']['image'] == expected
+
+
+def test_local_sandbox_still_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from evalscope.api.mixin import code_execution_sandbox_mixin as mixin
+    from evalscope.api.sandbox import DockerImageResult
+
+    built = []
+    monkeypatch.setattr(mixin, 'prepare_docker_image', lambda spec: built.append(spec) or DockerImageResult(
+        image_tag='local:tag', reused=False, context_hash='h'))
+    monkeypatch.setattr(mixin, 'build_and_acquire_pool_sync', lambda **kwargs: object())
+    config = TaskConfig(model='offline-test', eval_type='mock_llm', datasets=['mbpp_plus'])
+    config.sandbox.enabled = True
+    adapter = get_benchmark('mbpp_plus', config)
+    mixin.EnclaveCodeExecutionBackend(adapter.benchmark_meta, config, adapter.get_sandbox_image_spec).start()
+    assert len(built) == 1
