@@ -6,7 +6,7 @@ import uuid
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
@@ -375,7 +375,13 @@ def synthesize_agent_messages(
 
     messages: List[ChatMessage] = []
     questions: List[List[Dict[str, Any]]] = prompt_entry.get('question', []) or []
-    turns: List[Any] = model_result if isinstance(model_result, list) else []
+    if isinstance(model_result, str) or (
+        isinstance(model_result, list) and model_result and all(isinstance(call, dict) for call in model_result)
+    ):
+        # Single-turn results are one step: a list of {name: args} calls, or text when prompting.
+        turns: List[Any] = [[model_result]]
+    else:
+        turns = model_result if isinstance(model_result, list) else []
     # Inference_log mixes per-turn dicts and bare state-log lists; keep only
     # the per-turn dicts so they align positionally with ``turns``.
     turn_logs: List[Dict[str, Any]] = (
@@ -611,3 +617,33 @@ def compute_aggregate_subsets(report: Report) -> None:
                 dummy_subsets.append(subset)
         dummy_category = Category(name='-', subsets=dummy_subsets)
         metric.categories.append(dummy_category)
+
+
+def apply_api_trace(messages: Optional[List[ChatMessage]], trace: List[Dict[str, Any]]) -> bool:
+    """Restore server tool-call ids and reasoning onto synthesized assistant messages.
+
+    Assistant messages correspond positionally to model API calls. When the counts differ the
+    synthesized messages are left unchanged and ``False`` is returned; the raw trace is still
+    stored with the prediction.
+    """
+    from evalscope.api.messages import ChatMessageAssistant, ContentReasoning, ContentText
+
+    responses = [record.get('response') for record in trace if 'response' in record]
+    assistants = [message for message in messages or [] if isinstance(message, ChatMessageAssistant)]
+    if not assistants or len(assistants) != len(responses):
+        return False
+    for message, response in zip(assistants, responses):
+        choices = (response or {}).get('choices') or []
+        if not choices:
+            continue
+        server_message = choices[0].get('message') or {}
+        server_calls = server_message.get('tool_calls') or []
+        if message.tool_calls and len(server_calls) == len(message.tool_calls):
+            for call, server_call in zip(message.tool_calls, server_calls):
+                if server_call.get('id'):
+                    call.id = server_call['id']
+        reasoning = server_message.get('reasoning_content') or server_message.get('reasoning')
+        if reasoning:
+            text = message.text
+            message.content = [ContentReasoning(reasoning=str(reasoning)), ContentText(text=text)]
+    return True

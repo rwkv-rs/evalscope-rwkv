@@ -1,4 +1,5 @@
-from typing import Any, Dict, Optional, Tuple
+import threading
+from typing import Any, Dict, List, Optional, Tuple
 
 from bfcl_eval.model_handler.api_inference.openai_completion import OpenAICompletionsHandler
 from openai.resources.chat.completions import Completions
@@ -9,6 +10,13 @@ from evalscope.utils.argument_utils import get_supported_params
 
 # The BFCL handler sets these itself and parses whole (non-streamed) responses.
 _HANDLER_OWNED = {'model', 'messages', 'tools', 'stream', 'stream_options'}
+# Never persist credentials that may travel with a request.
+_UNRECORDED_REQUEST_KEYS = {'extra_headers'}
+_trace = threading.local()
+
+
+def _dump(value: Any) -> Any:
+    return value.model_dump(mode='json') if hasattr(value, 'model_dump') else value
 
 
 class ConfiguredOpenAICompletionsHandler(OpenAICompletionsHandler):
@@ -41,6 +49,17 @@ class ConfiguredOpenAICompletionsHandler(OpenAICompletionsHandler):
             params['extra_body'] = extra_body
         return params
 
+    @staticmethod
+    def start_trace() -> None:
+        """Record every request/response exchanged by this thread until :meth:`collect_trace`."""
+        _trace.records = []
+
+    @staticmethod
+    def collect_trace() -> List[Dict[str, Any]]:
+        records = getattr(_trace, 'records', None) or []
+        _trace.records = None
+        return records
+
     def generate_with_backoff(self, **kwargs: Any) -> Tuple[Any, float]:
         for key, value in self._request_params.items():
             if key == 'extra_body':
@@ -48,4 +67,16 @@ class ConfiguredOpenAICompletionsHandler(OpenAICompletionsHandler):
             else:
                 # Values set by BFCL for a specific request (e.g. temperature) take precedence.
                 kwargs.setdefault(key, value)
-        return super().generate_with_backoff(**kwargs)
+        records = getattr(_trace, 'records', None)
+        request = {k: _dump(v) for k, v in kwargs.items() if k not in _UNRECORDED_REQUEST_KEYS}
+        try:
+            response, latency = super().generate_with_backoff(**kwargs)
+        except Exception as exc:
+            if records is not None:
+                records.append({'request': request, 'error': f'{type(exc).__name__}: {exc}'})
+            raise
+        if records is not None:
+            # The full response keeps server fields such as tool-call ids, reasoning_content
+            # and a rendered prompt_text when the server returns one.
+            records.append({'request': request, 'response': _dump(response), 'latency': latency})
+        return response, latency

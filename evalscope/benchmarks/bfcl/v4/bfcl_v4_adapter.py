@@ -23,6 +23,7 @@ from evalscope.utils.logger import get_logger
 
 from .utils import (
     ALL_SCORING_CATEGORIES,
+    apply_api_trace,
     compute_aggregate_subsets,
     compute_entry_result,
     load_bfcl_data,
@@ -228,12 +229,17 @@ class BFCLV4Adapter(AgentAdapter):
         self.prereq_finished = True
 
     def _on_inference(self, model: Model, sample: Sample) -> InferenceResult:
+        trace: List[Dict[str, Any]] = []
         try:
             self._init_handler()
 
-            result, metadata = self.handler.inference(
-                deepcopy(sample.metadata), include_input_log=False, exclude_state_log=True
-            )
+            self.handler.start_trace()
+            try:
+                result, metadata = self.handler.inference(
+                    deepcopy(sample.metadata), include_input_log=False, exclude_state_log=True
+                )
+            finally:
+                trace = self.handler.collect_trace()
 
             output = ModelOutput.from_content(
                 model=model.name,
@@ -245,6 +251,8 @@ class BFCLV4Adapter(AgentAdapter):
                 is_fc_model=self.is_fc_model,
                 inference_log=metadata.get('inference_log') if isinstance(metadata, dict) else None,
             )
+            aligned = apply_api_trace(agent_messages, trace)
+            output.metadata = {**(output.metadata or {}), 'bfcl_api_trace': trace, 'bfcl_trace_aligned': aligned}
             self._attach_perf_metrics(output, agent_messages, metadata)
             return InferenceResult(output=output, messages=agent_messages or None)
         except Exception as e:
@@ -252,6 +260,7 @@ class BFCLV4Adapter(AgentAdapter):
             logger.error(traceback.format_exc())
             content = json.dumps({'error': str(e), 'error_message': traceback.format_exc()})
             output = ModelOutput.from_content(model=model.name, content=content)
+            output.metadata = {'bfcl_api_trace': trace}
             if is_transport_error(e):
                 # The service did not answer: this is not a model response and must stay
                 # identifiable (and retryable) instead of being graded, e.g. as "no tool call".

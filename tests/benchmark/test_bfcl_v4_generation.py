@@ -169,3 +169,41 @@ def test_bfcl_shuffle_order_ignores_global_random_state(monkeypatch: pytest.Monk
         orders.append([sample.metadata['id'] for sample in dataset])
     assert orders[0] == orders[1]
     assert orders[0] != [record['id'] for record in records]
+
+
+def test_actual_api_trace_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 8: keep the real request/response, server tool-call ids and reasoning."""
+    from types import SimpleNamespace
+
+    from openai.types.chat import ChatCompletion
+
+    from evalscope.api.dataset import Sample
+    from evalscope.api.messages import ChatMessageAssistant, ContentReasoning
+
+    adapter = make_adapter(monkeypatch, 256)
+    adapter.handler.client.chat.completions.create.return_value = ChatCompletion.model_validate({
+        'id': 'resp-1', 'object': 'chat.completion', 'created': 0, 'model': 'test-model',
+        'prompt_text': 'User: area?\nAssistant:',
+        'usage': {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 7},
+        'choices': [{
+            'index': 0, 'finish_reason': 'tool_calls',
+            'message': {
+                'role': 'assistant', 'content': None, 'reasoning_content': 'Need the area tool.',
+                'tool_calls': [{
+                    'id': 'call_server_1', 'type': 'function',
+                    'function': {'name': 'calculate_area', 'arguments': '{"base": 3}'},
+                }],
+            },
+        }],
+    })
+    entry = dict(IRRELEVANCE_ENTRY, id='simple_python_0', category='simple_python', ground_truth=[])
+    result = adapter._on_inference(SimpleNamespace(name='test-model'), Sample(input='q', metadata=entry))
+
+    trace = result.output.metadata['bfcl_api_trace']
+    assert len(trace) == 1
+    assert trace[0]['request']['max_tokens'] == 256
+    assert trace[0]['response']['prompt_text'] == 'User: area?\nAssistant:'
+    assert result.output.metadata['bfcl_trace_aligned'] is True
+    assistant = [m for m in result.messages if isinstance(m, ChatMessageAssistant)][0]
+    assert [call.id for call in assistant.tool_calls] == ['call_server_1']
+    assert any(isinstance(c, ContentReasoning) and c.reasoning == 'Need the area tool.' for c in assistant.content)
