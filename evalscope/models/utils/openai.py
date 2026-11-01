@@ -680,11 +680,23 @@ def model_output_from_openai(
         for choice in completion.choices
         if choice.finish_reason is not None and as_stop_reason(choice.finish_reason) == 'unknown'
     }
+    metadata: Dict[str, Any] = {'finish_reasons': finish_reasons} if finish_reasons else {}
+    # Keep server-provided audit fields: the rendered prompt and the matched stop (vLLM-style).
+    prompt_text = (completion.model_extra or {}).get('prompt_text')
+    if prompt_text is not None:
+        metadata['prompt_text'] = prompt_text
+    matched_stops = {
+        str(choice.index): (choice.model_extra or {})['stop_reason']
+        for choice in completion.choices
+        if (choice.model_extra or {}).get('stop_reason') is not None
+    }
+    if matched_stops:
+        metadata['server_stop_reasons'] = matched_stops
     return ModelOutput(
         id=completion.id,
         model=completion.model,
         choices=choices,
-        metadata={'finish_reasons': finish_reasons} if finish_reasons else None,
+        metadata=metadata or None,
         usage=(
             ModelUsage(
                 input_tokens=completion.usage.prompt_tokens,
