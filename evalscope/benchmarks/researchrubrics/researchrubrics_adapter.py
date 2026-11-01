@@ -135,6 +135,11 @@ Resources: [Paper](https://arxiv.org/abs/2511.07685) |
 """
 
 
+def _report_was_truncated(task_state: TaskState) -> bool:
+    """The response stopped at the output limit instead of finishing."""
+    return task_state.output.stop_reason == 'max_tokens'
+
+
 def _is_empty_report(task_state: TaskState) -> bool:
     return not (task_state.output.completion or '').strip()
 
@@ -320,21 +325,31 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
         cases = self._build_cases(context)
         if _is_empty_report(context.task_state):
             entries = [{'score': 0.0, **case.metadata} for case in cases]
+            # A report cut off by the output limit is incomplete, not an empty answer: it still
+            # scores zero (it stays in the denominator) but is labelled distinctly.
+            truncated = _report_was_truncated(context.task_state)
+            reason = 'truncated_report' if truncated else 'empty_report'
             return JudgeDefinition.skip(
                 Score(
                     prediction=context.original_prediction,
                     extracted_prediction=context.filtered_prediction,
                     value=self._rubric_values(entries),
                     main_score_name='compliance_score',
-                    explanation='Empty research report receives zero rubric compliance.',
+                    explanation=(
+                        'Research report was truncated at the output limit before any report text; '
+                        'zero rubric compliance.' if truncated else
+                        'Empty research report receives zero rubric compliance.'
+                    ),
                     metadata={
-                        'source': 'researchrubrics_empty_report',
+                        'source': f'researchrubrics_{reason}',
                         'grading_mode': 'rule',
                         'rubric_count': len(cases),
                         'used_chunking': False,
+                        'stop_reason': context.task_state.output.stop_reason,
+                        'final_answer_missing': truncated,
                     },
                 ),
-                reason='empty_report',
+                reason=reason,
             )
         return JudgeDefinition.workflow(
             cases=cases,

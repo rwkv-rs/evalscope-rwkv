@@ -408,3 +408,18 @@ def test_aggregate_scores_outputs_diagnostic_dimensions() -> None:
     assert axis_score.num == 1
     domain_scores = [s for s in scores if 'domain' in s.metric_name or 'ai' in s.metric_name or 'other' in s.metric_name]
     assert len(domain_scores) >= 2
+
+
+def test_truncated_report_is_labelled_distinctly_from_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 9: a report cut off by max_tokens is not a normally completed empty report."""
+    adapter = make_adapter()
+    monkeypatch.setattr(adapter, 'init_llm_judges', MagicMock(side_effect=AssertionError('no judge for no report')))
+    state = make_state(adapter, [{'criterion': 'Answer', 'weight': 5.0, 'axis': 'Content'}], report='')
+    state.output.choices[0].stop_reason = 'max_tokens'
+    scores = adapter.batch_calculate_metrics([state], [adapter.calculate_metrics(state)])
+    score = scores[0].score
+    assert score.value == {'compliance_score': 0.0, 'axis/Content': 0.0}
+    assert score.status is ScoreStatus.SUCCESS
+    assert score.metadata['judge_skip_reason'] == 'truncated_report'
+    assert score.metadata['final_answer_missing'] is True
+    assert score.metadata['stop_reason'] == 'max_tokens'
