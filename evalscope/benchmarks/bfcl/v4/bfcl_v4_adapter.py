@@ -1,6 +1,7 @@
 import json
 import os
 import traceback
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -175,7 +176,8 @@ class BFCLV4Adapter(AgentAdapter):
             limit=self.limit,
             repeats=self.repeats,
             shuffle=self.shuffle,
-            seed=None,
+            # Never depend on global random state: a resumed or retried run must see the same order.
+            seed=self.seed if self.seed is not None else zlib.crc32(category.encode('utf-8')),
         )
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
@@ -208,7 +210,7 @@ class BFCLV4Adapter(AgentAdapter):
             temperature=self._task_config.generation_config.temperature,
             registry_name=self._task_config.model_id,
             is_fc_model=self.is_fc_model,
-            max_tokens=self._task_config.generation_config.max_tokens,
+            generation_config=self._task_config.generation_config,
         )
 
         self._prereq_inference()

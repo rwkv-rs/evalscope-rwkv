@@ -116,3 +116,56 @@ def test_model_side_failure_keeps_official_grading(monkeypatch: pytest.MonkeyPat
     assert output.error is None
     assert score.status is ScoreStatus.SUCCESS
     assert score.value == {'acc': 1}
+
+
+def test_full_generation_config_reaches_bfcl_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 6: RWKV sampling and chat-template settings must reach every BFCL request."""
+    from bfcl_eval.model_handler.api_inference import openai_completion
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = 'response'
+    monkeypatch.setattr(openai_completion, 'OpenAI', lambda **kwargs: client)
+    config = TaskConfig(
+        model='test-model', api_key='test-key', api_url='https://example.test/v1', datasets=['bfcl_v4'],
+        generation_config={
+            'max_tokens': 512, 'temperature': 0.3, 'top_p': 0.6, 'top_k': 20, 'presence_penalty': 0.5,
+            'frequency_penalty': 0.1, 'seed': 7, 'stream': True,
+            'extra_body': {'chat_template_kwargs': {'enable_thinking': False}, 'penalty_decay': 0.996},
+        },
+    )
+    adapter = get_benchmark('bfcl_v4', config)
+    monkeypatch.setattr(adapter, '_prereq_inference', lambda: None)
+    adapter._init_handler()
+    adapter.handler._query_FC({'message': [{'role': 'user', 'content': 'q'}], 'tools': []})
+    sent = client.chat.completions.create.call_args.kwargs
+    assert sent['max_tokens'] == 512 and sent['top_p'] == 0.6 and sent['seed'] == 7
+    assert sent['presence_penalty'] == 0.5 and sent['frequency_penalty'] == 0.1
+    assert sent['temperature'] == 0.3
+    assert 'stream' not in sent and 'top_k' not in sent
+    assert sent['extra_body'] == {
+        'chat_template_kwargs': {'enable_thinking': False}, 'penalty_decay': 0.996, 'top_k': 20,
+    }
+
+
+def test_bfcl_shuffle_order_ignores_global_random_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 2: consuming random numbers before loading must not change BFCL sample order."""
+    import random
+
+    records = [
+        {'id': f'simple_{i}', 'question': [[{'role': 'user', 'content': str(i)}]], 'ground_truth': []}
+        for i in range(12)
+    ]
+    adapter = make_adapter(monkeypatch, None)
+    adapter.shuffle = True
+    monkeypatch.setattr(
+        'evalscope.benchmarks.bfcl.v4.bfcl_v4_adapter.process_test_entries',
+        lambda **kwargs: (kwargs['test_entries'], []),
+    )
+    orders = []
+    for consumed in (0, 5):
+        for _ in range(consumed):
+            random.random()
+        dataset = adapter._create_dataset_for_category('simple_python', records, [])
+        orders.append([sample.metadata['id'] for sample in dataset])
+    assert orders[0] == orders[1]
+    assert orders[0] != [record['id'] for record in records]
