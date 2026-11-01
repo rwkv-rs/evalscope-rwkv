@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from evalscope.api.dataset import Dataset, Sample
 from evalscope.api.evaluator import CacheManager, Evaluator, TaskState
-from evalscope.api.evaluator.cache import review_needs_retry
+from evalscope.api.evaluator.cache import review_needs_retry, sample_fingerprint
 from evalscope.api.judge import summarize_judge_runs
 from evalscope.api.metric import AggScore, SampleScore
 from evalscope.api.registry import register_evaluator
@@ -538,7 +538,10 @@ class DefaultEvaluator(Evaluator):
             TaskState: The task state containing the prediction result.
         """
         logger.debug(f'\n{sample.pretty_print()}')
+        # Fingerprint before inference: adapters may mutate the shared sample while predicting.
+        fingerprint = sample_fingerprint(sample)
         task_state = self.benchmark.run_inference(model=self.model, sample=sample, output_dir=model_prediction_dir)
+        task_state.sample_fingerprint = fingerprint
         return task_state
 
     def _review_task_state(self, task_state: TaskState) -> SampleScore:

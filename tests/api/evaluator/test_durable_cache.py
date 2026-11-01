@@ -11,7 +11,8 @@ import pytest
 
 from evalscope.api.dataset import MemoryDataset, Sample
 from evalscope.api.evaluator import CacheManager, TaskState
-from evalscope.api.evaluator.cache import ModelResult, review_needs_retry
+from evalscope.api.evaluator.cache import CacheIdentityError, ModelResult, review_needs_retry, sample_fingerprint
+from evalscope.api.messages import ChatMessageUser
 from evalscope.api.messages.perf_metrics import PerformanceMetrics
 from evalscope.api.metric import JudgeSummary, SampleScore, Score
 from evalscope.api.model import ModelOutput
@@ -106,14 +107,16 @@ def test_malformed_complete_records_are_skipped_without_rewriting(tmp_path: Path
 
 def test_cache_keeps_latest_id_and_retries_only_failed_stage(tmp_path: Path) -> None:
     manager = cache(tmp_path)
-    for index in range(5):
-        manager.save_prediction_cache('test', state(index))
-        manager.save_review_cache('test', state(index), score(index))
+    states = [state(index) for index in range(5)]
+    for index, item in enumerate(states):
+        manager.save_prediction_cache('test', item)
+        manager.save_review_cache('test', item, score(index))
     manager.save_prediction_cache('test', state(0, error='request timed out'))
-    manager.save_prediction_cache('test', state(1))
-    manager.save_review_cache('test', state(1), score(1, 1))
-    manager.save_review_cache('test', state(2), score(2, status=ScoreStatus.TRANSPORT_ERROR))
-    manager.save_review_cache('test', state(3), score(3, status=ScoreStatus.PARSE_ERROR))
+    regenerated = state(1)
+    manager.save_prediction_cache('test', regenerated)
+    manager.save_review_cache('test', regenerated, score(1, 1))
+    manager.save_review_cache('test', states[2], score(2, status=ScoreStatus.TRANSPORT_ERROR))
+    manager.save_review_cache('test', states[3], score(3, status=ScoreStatus.PARSE_ERROR))
     manager.close()
 
     predictions, remaining = manager.filter_prediction_cache('test', MemoryDataset([state(i)._sample for i in range(5)]))
@@ -123,6 +126,71 @@ def test_cache_keeps_latest_id_and_retries_only_failed_stage(tmp_path: Path) -> 
     assert {item.sample_id: item.score.value for item in scores} == {
         1: {'accuracy': 1}, 3: {'accuracy': 0}, 4: {'accuracy': 0},
     }
+
+
+def test_review_of_an_earlier_generation_is_not_reused(tmp_path: Path) -> None:
+    """Failed prediction reviewed, regenerated, interrupted before the new review (finding 3)."""
+    manager = cache(tmp_path)
+    failed = state(0)
+    failed.output = ModelOutput.from_content(model='model', content='wrong earlier answer')
+    manager.save_prediction_cache('test', failed)
+    manager.save_review_cache('test', failed, score(0, 0))
+    regenerated = state(0)
+    manager.save_prediction_cache('test', regenerated)  # interrupted before its review
+    manager.close()
+
+    predictions, _ = manager.filter_prediction_cache('test', MemoryDataset([state(0)._sample]))
+    assert predictions[0].output.completion == 'answer 0'
+    scores, need_review = manager.filter_review_cache('test', predictions)
+    assert scores == []
+    assert [item.sample_id for item in need_review] == [0]
+
+
+def test_legacy_rows_link_only_without_regeneration(tmp_path: Path) -> None:
+    manager = cache(tmp_path)
+    pred_path = Path(manager.get_prediction_cache_path('test'))
+    review_path = Path(manager.get_review_cache_path('test'))
+    rows = []
+    for index, content in [(0, 'only'), (1, 'first'), (1, 'second')]:
+        item = state(index)
+        item.output = ModelOutput.from_content(model='model', content=content)
+        row = ModelResult.from_task_state(item).model_dump(mode='json')
+        row.pop('prediction_id')
+        row.pop('sample_fingerprint')
+        rows.append(json.dumps(row))
+    pred_path.write_text('\n'.join(rows) + '\n')
+    review_path.write_text('\n'.join(
+        json.dumps({'index': i, 'sample_score': score(i, 1).model_dump(mode='json')}) for i in (0, 1)
+    ) + '\n')
+
+    predictions, _ = manager.filter_prediction_cache('test', MemoryDataset([state(i)._sample for i in range(2)]))
+    scores, need_review = manager.filter_review_cache('test', predictions)
+    assert [item.sample_id for item in scores] == [0]
+    assert [item.sample_id for item in need_review] == [1]
+
+
+def test_reordered_dataset_is_rejected_instead_of_mixing_samples(tmp_path: Path) -> None:
+    """Shuffled resume must not attach a cached answer to a different question (finding 2)."""
+    manager = cache(tmp_path)
+    for index in range(3):
+        item = state(index)
+        item.sample_fingerprint = sample_fingerprint(item._sample)
+        manager.save_prediction_cache('test', item)
+    manager.close()
+    reordered = [Sample(id=i, input=f'input {j}') for i, j in enumerate([2, 0, 1])]
+    with pytest.raises(CacheIdentityError):
+        manager.filter_prediction_cache('test', MemoryDataset(reordered))
+    same = [Sample(id=i, input=f'input {i}') for i in range(3)]
+    predictions, remaining = manager.filter_prediction_cache('test', MemoryDataset(same))
+    assert len(predictions) == 3 and len(remaining) == 0
+
+
+def test_fingerprint_ignores_random_message_ids() -> None:
+    first = Sample(input=[ChatMessageUser(content='q')], target='a')
+    second = Sample(input=[ChatMessageUser(content='q')], target='a')
+    assert first.input[0].id != second.input[0].id
+    assert sample_fingerprint(first) == sample_fingerprint(second)
+    assert sample_fingerprint(first) != sample_fingerprint(Sample(input=[ChatMessageUser(content='r')], target='a'))
 
 
 @pytest.mark.parametrize('status,retry', [(ScoreStatus.EXCLUDED, True), (ScoreStatus.DEGRADED, False)])
