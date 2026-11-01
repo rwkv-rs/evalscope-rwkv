@@ -51,6 +51,13 @@ TaskConfig(
 )
 ```
 
+### Coding 评分版本
+
+评测版本 `v1.1` 中，`bigcodebench`/`bigcodebench_hard` 运行数据集中的 unittest 测试类，
+`mbpp_plus` 运行完整的扩展 `test` 程序，`scicode` 从带围栏的回复中提取代码。
+未自定义 `image` 时，BigCodeBench 与 MBPP+ 会构建各自的 Docker 镜像（BigCodeBench evaluate 镜像、
+HumanEval+ NumPy 镜像）。旧结果可通过 `--use-cache <run> --rerun-review` 重新评分。
+
 ## 1. 本地使用
 
 使用Docker在本地机器上搭建沙箱环境，并在本地进行评测，需本地机器支持Docker

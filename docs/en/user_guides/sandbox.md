@@ -51,6 +51,14 @@ TaskConfig(
 )
 ```
 
+### Coding scorer versions
+
+Evaluation version `v1.1` of `bigcodebench`/`bigcodebench_hard` runs the dataset's unittest
+classes, `mbpp_plus` runs the full expanded `test` program, and `scicode` extracts code from
+fenced responses. BigCodeBench and MBPP+ build their Docker images (BigCodeBench evaluate image,
+HumanEval+ NumPy image) unless you set a custom `image`. Re-grade older runs with
+`--use-cache <run> --rerun-review`.
+
 ## 1. Local Usage
 
 Use Docker to set up a sandbox environment on a local machine and conduct evaluation locally, requiring Docker support on the local machine.
