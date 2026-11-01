@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from statistics import median
 from typing import Any, List, Optional
 
 from evalscope.perf.utils.perf_constants import Metrics
@@ -45,6 +46,8 @@ class BenchmarkData:
     first_chunk_latency: float = 0.0
     time_per_output_token: float = 0.0
     inter_chunk_latency: List[float] = field(default_factory=list)
+    pd_handoff_latency: Optional[float] = None
+    pd_handoff_overhead: Optional[float] = None
     max_gpu_memory_cost = 0  # class-level default; updated by update_gpu_usage
 
     # --- Response content ---
@@ -90,11 +93,13 @@ class BenchmarkData:
     """True when this request is a warmup request, excluded from final metrics."""
 
     # --- Speculative decoding specific ---
+    n_decode_chunks: int = 0
+    """Streamed chunks from the first output on, including ones whose delta is empty."""
     decoded_tokens_per_iter: float = 0.0
     """Average decoded tokens per iteration: (completion_tokens - 1) / (n_chunks - 1).
     Approximates speculative decoding acceptance length L."""
 
-    def finalize(self, api_plugin) -> None:
+    def finalize(self, api_plugin, enable_pd_metrics: bool = False) -> None:
         """Parse token counts and compute all derived timing metrics.
 
         Must be called after the response is fully received.  Idempotent:
@@ -107,18 +112,25 @@ class BenchmarkData:
 
         # tpot = (latency - ttft) / (output_len - 1)
         if self.completion_tokens and self.completion_tokens > 1:
-            self.time_per_output_token = ((self.query_latency - self.first_chunk_latency) /
-                                          (self.completion_tokens - 1))
+            self.time_per_output_token = (self.query_latency - self.first_chunk_latency) / (self.completion_tokens - 1)
 
         # Derive inter-chunk latencies from chunk timestamps when not already set
         if not self.inter_chunk_latency and self.chunk_times:
             self.inter_chunk_latency = [t2 - t1 for t1, t2 in zip(self.chunk_times[:-1], self.chunk_times[1:])]
 
+        if enable_pd_metrics and self.inter_chunk_latency:
+            self.pd_handoff_latency = self.inter_chunk_latency[0]
+            steady_decode_latencies = self.inter_chunk_latency[1:]
+            if steady_decode_latencies:
+                self.pd_handoff_overhead = max(0.0, self.pd_handoff_latency - median(steady_decode_latencies))
+
         # Compute average decoded tokens per iteration for speculative decoding estimation
         # Formula: L = (tokens - 1) / (chunks - 1)
-        # n_chunks is inferred from inter_chunk_latency: N chunks produce N-1 inter-chunk intervals,
-        # so n_chunks = len(inter_chunk_latency) + 1.  Falls back to chunk_times when available.
-        if self.chunk_times:
+        # n_chunks comes from the plugin's decode-chunk count, which includes empty deltas that
+        # inter_chunk_latency leaves out; otherwise from chunk_times, or len(inter_chunk_latency) + 1.
+        if self.n_decode_chunks:
+            n_chunks = self.n_decode_chunks
+        elif self.chunk_times:
             n_chunks = len(self.chunk_times)
         elif self.inter_chunk_latency:
             n_chunks = len(self.inter_chunk_latency) + 1
@@ -132,11 +144,19 @@ class BenchmarkData:
             self.cached_tokens = self.real_cached_tokens
 
     def update_gpu_usage(self) -> None:
-        """Update max GPU memory usage across all visible CUDA devices."""
+        """Update max GPU/NPU memory usage across all visible devices."""
         if check_import('torch', raise_warning=False):
             import torch
-            total_memory = sum(torch.cuda.max_memory_allocated(i) / 2**30 for i in range(torch.cuda.device_count()))
-            self.max_gpu_memory_cost = max(self.max_gpu_memory_cost, total_memory)
+
+            from evalscope.utils.model_utils import get_device
+
+            device = get_device()
+            if device == 'cuda' and torch.cuda.is_available():
+                total_memory = sum(torch.cuda.max_memory_allocated(i) / 2**30 for i in range(torch.cuda.device_count()))
+                self.max_gpu_memory_cost = max(self.max_gpu_memory_cost, total_memory)
+            elif device == 'npu' and hasattr(torch, 'npu') and torch.npu.is_available():
+                total_memory = sum(torch.npu.max_memory_allocated(i) / 2**30 for i in range(torch.npu.device_count()))
+                self.max_gpu_memory_cost = max(self.max_gpu_memory_cost, total_memory)
 
 
 # ===========================================================================
@@ -150,11 +170,13 @@ class MetricsAccumulator:
 
     Call :meth:`update` for each completed :class:`BenchmarkData`, then call
     :meth:`to_result` to obtain a computed :class:`BenchmarkMetrics` snapshot.
+    Latency averages use running totals so snapshots do not scan past intervals.
     """
 
     # --- Test configuration ---
     concurrency: int = 0
     rate: float = 0.0
+    enable_pd_metrics: bool = False
 
     # --- Request counts ---
     n_total: int = 0
@@ -170,17 +192,25 @@ class MetricsAccumulator:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_time_per_output_token: float = 0.0
-    all_inter_token_latencies: List[float] = field(default_factory=list)
+    total_pd_handoff_latency: float = 0.0
+    total_pd_handoff_overhead: float = 0.0
+    n_pd_handoff_latency: int = 0
+    n_pd_handoff_overhead: int = 0
+    total_inter_token_latency: float = 0.0
+    n_inter_token_latencies: int = 0
+    total_steady_inter_token_latency: float = 0.0
+    n_steady_inter_token_latencies: int = 0
 
     # --- Stream-only cumulative sums (stream requests only) ---
     # ITL is intentionally *not* bucketed here: non-stream requests contribute an
-    # empty inter_chunk_latency list, so all_inter_token_latencies is already
+    # empty inter_chunk_latency list, so total_inter_token_latency is already
     # stream-only by construction and needs no separate accumulator.
     n_stream_success: int = 0
     n_stream_total: int = 0
     n_non_stream_total: int = 0
     total_first_chunk_latency_stream: float = 0.0
     total_time_per_output_token_stream: float = 0.0
+    n_stream_tpot: int = 0  # streamed replies with a decode phase (> 1 token)
 
     # --- Multi-turn cumulative sums ---
     total_input_turns: int = 0
@@ -240,19 +270,33 @@ class MetricsAccumulator:
 
         if data.success:
             self.n_success += 1
-            data.finalize(api_plugin)
+            data.finalize(api_plugin, enable_pd_metrics=self.enable_pd_metrics)
 
             self.total_latency += data.query_latency
             self.total_first_chunk_latency += data.first_chunk_latency
             self.total_prompt_tokens += data.prompt_tokens
             self.total_completion_tokens += data.completion_tokens
             self.total_time_per_output_token += data.time_per_output_token
-            self.all_inter_token_latencies += data.inter_chunk_latency
+            self.total_inter_token_latency += sum(data.inter_chunk_latency)
+            self.n_inter_token_latencies += len(data.inter_chunk_latency)
+            if self.enable_pd_metrics:
+                if len(data.inter_chunk_latency) > 1:
+                    self.total_steady_inter_token_latency += sum(data.inter_chunk_latency[1:])
+                    self.n_steady_inter_token_latencies += len(data.inter_chunk_latency) - 1
+                if data.pd_handoff_latency is not None:
+                    self.total_pd_handoff_latency += data.pd_handoff_latency
+                    self.n_pd_handoff_latency += 1
+                if data.pd_handoff_overhead is not None:
+                    self.total_pd_handoff_overhead += data.pd_handoff_overhead
+                    self.n_pd_handoff_overhead += 1
 
             if data.is_stream:
                 self.n_stream_success += 1
                 self.total_first_chunk_latency_stream += data.first_chunk_latency
-                self.total_time_per_output_token_stream += data.time_per_output_token
+                # A one-token reply has no decode phase, so no TPOT to average.
+                if data.completion_tokens and data.completion_tokens > 1:
+                    self.total_time_per_output_token_stream += data.time_per_output_token
+                    self.n_stream_tpot += 1
 
             # Multi-turn specific
             if data.input_num_turns > 0:
@@ -285,7 +329,14 @@ class MetricsAccumulator:
         self._update_wall_time(data)
 
     def _update_wall_time(self, data: BenchmarkData) -> None:
-        """Expand the wall-clock window to cover *data*'s lifecycle."""
+        """Expand the wall-clock window to cover *data*'s lifecycle.
+
+        Records without a valid timing interval are skipped: folding an absent
+        start or a completion before its start into the window would corrupt
+        QPS and throughput.
+        """
+        if data.start_time <= 0 or data.completed_time < data.start_time:
+            return
         if self._wall_start is None:
             self._wall_start = data.start_time
         else:
@@ -316,33 +367,54 @@ class MetricsAccumulator:
             # fall back to the all-request computation so their values are unchanged.
             if self.n_stream_success > 0:
                 avg_first_chunk_latency = _safe_div(self.total_first_chunk_latency_stream, self.n_stream_success)
-                avg_time_per_output_token = _safe_div(self.total_time_per_output_token_stream, self.n_stream_success)
+                avg_time_per_output_token = _safe_div(
+                    self.total_time_per_output_token_stream, self.n_stream_tpot, default=0.0
+                )
             else:
                 avg_first_chunk_latency = _safe_div(self.total_first_chunk_latency, n)
                 avg_time_per_output_token = _safe_div(self.total_time_per_output_token, n)
             avg_prompt_tokens = _safe_div(self.total_prompt_tokens, n)
             avg_completion_tokens = _safe_div(self.total_completion_tokens, n)
             avg_inter_token_latency = (
-                sum(self.all_inter_token_latencies)
-                / len(self.all_inter_token_latencies) if self.all_inter_token_latencies else 0.0
+                self.total_inter_token_latency / self.n_inter_token_latencies if self.n_inter_token_latencies else 0.0
+            )
+            avg_steady_inter_token_latency = (
+                self.total_steady_inter_token_latency / self.n_steady_inter_token_latencies
+                if self.n_steady_inter_token_latencies
+                else -1
+            )
+            avg_pd_handoff_latency = (
+                _safe_div(self.total_pd_handoff_latency, self.n_pd_handoff_latency)
+                if self.n_pd_handoff_latency > 0
+                else -1
+            )
+            avg_pd_handoff_overhead = (
+                _safe_div(self.total_pd_handoff_overhead, self.n_pd_handoff_overhead)
+                if self.n_pd_handoff_overhead > 0
+                else -1
             )
             qps = _safe_div(n, t)
             # Deliberately population-wide: only used by embedding/rerank APIs
-            avg_input_token_throughput = _safe_div(self.total_prompt_tokens, self.total_first_chunk_latency)
+            # Use wall_time (t) as denominator ? total_first_chunk_latency is the sum of
+            # per-request latencies, which grows with concurrency and would make throughput
+            # appear to decrease as parallelism increases (10x deviation at concurrency 10).
+            avg_input_token_throughput = _safe_div(self.total_prompt_tokens, t)
             avg_output_token_throughput = _safe_div(self.total_completion_tokens, t)
             avg_total_token_throughput = _safe_div(self.total_prompt_tokens + self.total_completion_tokens, t)
-            avg_turns_per_request = (_safe_div(self.total_input_turns, n) if self.total_input_turns > 0 else -1)
+            avg_turns_per_request = _safe_div(self.total_input_turns, n) if self.total_input_turns > 0 else -1
             # Unbiased global KV-cache hit rate:
             # total_cached_tokens / total_prompt_tokens_for_cache
             # (includes turn 1 which contributes 0 cached tokens but still
             # counts in the denominator, so the ratio is not inflated).
             avg_cached_percent = (
-                _safe_div(self.total_cached_tokens
-                          * 100.0, self.total_prompt_tokens_for_cache, default=-1) if self.n_cache_turns > 0 else -1
+                _safe_div(self.total_cached_tokens * 100.0, self.total_prompt_tokens_for_cache, default=-1)
+                if self.n_cache_turns > 0
+                else -1
             )
             avg_decoded_tokens_per_iter = (
                 _safe_div(self.total_decoded_tokens_per_iter, self.n_decoded_samples)
-                if self.n_decoded_samples > 0 else -1
+                if self.n_decoded_samples > 0
+                else -1
             )
             # First-turn / subsequent-turn TTFT averages (multi-turn only).
             # -1 means "not applicable" (no multi-turn data observed).
@@ -362,6 +434,8 @@ class MetricsAccumulator:
             )
             avg_latency = avg_first_chunk_latency = avg_prompt_tokens = avg_completion_tokens = -1
             avg_time_per_output_token = avg_inter_token_latency = qps = -1
+            avg_steady_inter_token_latency = -1
+            avg_pd_handoff_latency = avg_pd_handoff_overhead = -1
             avg_input_token_throughput = avg_output_token_throughput = avg_total_token_throughput = -1
             avg_turns_per_request = avg_cached_percent = avg_decoded_tokens_per_iter = -1
             avg_first_turn_ttft = avg_subsequent_turn_ttft = -1
@@ -381,6 +455,9 @@ class MetricsAccumulator:
             avg_completion_tokens=avg_completion_tokens,
             avg_time_per_output_token=avg_time_per_output_token,
             avg_inter_token_latency=avg_inter_token_latency,
+            avg_steady_inter_token_latency=avg_steady_inter_token_latency,
+            avg_pd_handoff_latency=avg_pd_handoff_latency,
+            avg_pd_handoff_overhead=avg_pd_handoff_overhead,
             qps=qps,
             avg_input_token_throughput=avg_input_token_throughput,
             avg_output_token_throughput=avg_output_token_throughput,
@@ -423,6 +500,9 @@ class BenchmarkMetrics:
     avg_first_chunk_latency: float = -1
     avg_time_per_output_token: float = -1
     avg_inter_token_latency: float = -1
+    avg_steady_inter_token_latency: float = -1
+    avg_pd_handoff_latency: float = -1
+    avg_pd_handoff_overhead: float = -1
 
     # --- Throughput ---
     qps: float = -1
@@ -449,18 +529,27 @@ class BenchmarkMetrics:
     # Serialization
     # -----------------------------------------------------------------------
 
-    def create_message(self, ndigits: int = 4, api_type: str = None) -> dict:
+    def create_message(self, ndigits: int = 4, api_type: str = None, enable_pd_metrics: bool = False) -> dict:
         """Build a metrics dictionary suitable for logging or JSON export.
 
         Args:
             ndigits: Decimal places for rounding float values.
             api_type: API name string; selects LLM vs Embedding field set.
+            enable_pd_metrics: Include PD-disaggregation handoff metrics when available.
         """
         base = self._build_common_fields(ndigits)
         specific = (
             self._build_embedding_fields(ndigits)
-            if Metrics.is_embedding_or_rerank(api_type) else self._build_llm_fields(ndigits)
+            if Metrics.is_input_only(api_type)
+            else self._build_llm_fields(ndigits, enable_pd_metrics)
         )
+        if api_type in ('systemone', 'autotrust'):
+            specific[Metrics.INPUT_TOKEN_THROUGHPUT] = round(self.avg_prompt_tokens * self.qps, ndigits)
+            specific['Not Applicable Metrics'] = [
+                Metrics.AVERAGE_TIME_TO_FIRST_TOKEN,
+                Metrics.AVERAGE_TIME_PER_OUTPUT_TOKEN,
+                Metrics.AVERAGE_INTER_TOKEN_LATENCY,
+            ]
         multiturn = self._build_multiturn_fields(ndigits)
         speculative = self._build_speculative_decoding_fields(ndigits)
         return {**base, **specific, **multiturn, **speculative}
@@ -481,9 +570,9 @@ class BenchmarkMetrics:
             Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST: round(self.avg_prompt_tokens, r),
         }
 
-    def _build_llm_fields(self, r: int) -> dict:
+    def _build_llm_fields(self, r: int, enable_pd_metrics: bool = False) -> dict:
         """Additional fields for LLM text-generation APIs."""
-        return {
+        fields = {
             Metrics.OUTPUT_TOKEN_THROUGHPUT: round(self.avg_output_token_throughput, r),
             Metrics.TOTAL_TOKEN_THROUGHPUT: round(self.avg_total_token_throughput, r),
             Metrics.AVERAGE_TIME_TO_FIRST_TOKEN: round(self.avg_first_chunk_latency * 1000, 2),
@@ -491,6 +580,23 @@ class BenchmarkMetrics:
             Metrics.AVERAGE_INTER_TOKEN_LATENCY: round(self.avg_inter_token_latency * 1000, 2),
             Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST: round(self.avg_completion_tokens, r),
         }
+        if enable_pd_metrics:
+            fields.update(self._build_pd_handoff_fields())
+        return fields
+
+    def _build_pd_handoff_fields(self) -> dict:
+        """Conditionally include PD handoff metrics for streaming runs with enough chunks."""
+        result = {}
+        if self.avg_steady_inter_token_latency >= 0:
+            result[Metrics.AVERAGE_STEADY_INTER_TOKEN_LATENCY] = round(
+                self.avg_steady_inter_token_latency * 1000,
+                2,
+            )
+        if self.avg_pd_handoff_latency >= 0:
+            result[Metrics.AVERAGE_PD_HANDOFF_LATENCY] = round(self.avg_pd_handoff_latency * 1000, 2)
+        if self.avg_pd_handoff_overhead >= 0:
+            result[Metrics.AVERAGE_PD_HANDOFF_OVERHEAD] = round(self.avg_pd_handoff_overhead * 1000, 2)
+        return result
 
     def _build_embedding_fields(self, r: int) -> dict:
         """Additional fields for Embedding / Rerank APIs."""

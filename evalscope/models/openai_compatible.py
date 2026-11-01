@@ -1,8 +1,18 @@
+import asyncio
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-from openai import APIStatusError, AsyncOpenAI, BadRequestError, OpenAI, PermissionDeniedError, UnprocessableEntityError
+from openai import (
+    APIStatusError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+    UnprocessableEntityError,
+)
 from openai._types import NOT_GIVEN
 from openai.types.chat import ChatCompletion
 
@@ -16,6 +26,8 @@ from evalscope.utils.function_utils import async_retry_call, retry_call
 
 from .utils.async_client import LoopBoundAsyncClientPool
 from .utils.openai import (
+    EmptyCompletionError,
+    _NonRetryableEmptyCompletionError,
     async_collect_stream_response,
     chat_choices_from_openai,
     collect_stream_response,
@@ -25,13 +37,28 @@ from .utils.openai import (
     openai_chat_tools,
     openai_completion_params,
     openai_handle_bad_request,
+    raise_if_error_payload,
 )
 
 logger = get_logger()
 
+# Client errors (context length exceeded, invalid parameters, bad credentials, ...) are not
+# recoverable by retrying. generate()/generate_async() degrade them gracefully via
+# handle_bad_request(), so retry_call must let them through immediately instead of burning
+# retries * retry_interval on every failing sample.
+NON_RETRYABLE_OPENAI_ERRORS: Tuple[Type[Exception], ...] = (
+    BadRequestError,
+    AuthenticationError,
+    PermissionDeniedError,
+    NotFoundError,
+    UnprocessableEntityError,
+)
+
+
+_NON_RETRYABLE_COMPLETION_ERRORS = (*NON_RETRYABLE_OPENAI_ERRORS, _NonRetryableEmptyCompletionError)
+
 
 class OpenAICompatibleAPI(ModelAPI):
-
     def __init__(
         self,
         model_name: str,
@@ -129,6 +156,7 @@ class OpenAICompatibleAPI(ModelAPI):
             def _create_and_collect() -> Tuple[ChatCompletion, Optional[float]]:
                 raw_completion = self.client.chat.completions.create(**request)
                 if isinstance(raw_completion, ChatCompletion):
+                    raise_if_error_payload(raw_completion)
                     return raw_completion, None
                 return collect_stream_response(raw_completion, request_start=t_start)
 
@@ -136,6 +164,7 @@ class OpenAICompatibleAPI(ModelAPI):
                 _create_and_collect,
                 retries=config.retries,
                 sleep_interval=config.retry_interval,
+                no_retry_exceptions=_NON_RETRYABLE_COMPLETION_ERRORS,
             )
 
             total_time = time.monotonic() - t_start
@@ -158,7 +187,7 @@ class OpenAICompatibleAPI(ModelAPI):
             )
             return output
 
-        except (BadRequestError, UnprocessableEntityError, PermissionDeniedError) as ex:
+        except NON_RETRYABLE_OPENAI_ERRORS as ex:
             return self.handle_bad_request(ex)
         except ValueError as ex:
             logger.error(f'Model [{self.model_name}] returned an invalid response: {ex}')
@@ -186,10 +215,14 @@ class OpenAICompatibleAPI(ModelAPI):
             tools=len(tools) > 0,
         )
 
+        messages = await asyncio.to_thread(
+            openai_chat_messages,
+            input,
+            reasoning_format=(config.reasoning_history or 'reasoning_field'),
+            base_url=self.base_url,
+        )
         request = dict(
-            messages=openai_chat_messages(
-                input, reasoning_format=(config.reasoning_history or 'reasoning_field'), base_url=self.base_url
-            ),
+            messages=messages,
             tools=openai_chat_tools(tools) if len(tools) > 0 else NOT_GIVEN,
             tool_choice=openai_chat_tool_choice(tool_choice) if len(tools) > 0 else NOT_GIVEN,
             **completion_params,
@@ -207,6 +240,7 @@ class OpenAICompatibleAPI(ModelAPI):
             async def _create_and_collect() -> Tuple[ChatCompletion, Optional[float]]:
                 raw_completion = await self.async_client.chat.completions.create(**request)
                 if isinstance(raw_completion, ChatCompletion):
+                    raise_if_error_payload(raw_completion)
                     return raw_completion, None
                 return await async_collect_stream_response(raw_completion, request_start=t_start)
 
@@ -214,6 +248,7 @@ class OpenAICompatibleAPI(ModelAPI):
                 _create_and_collect,
                 retries=config.retries,
                 sleep_interval=config.retry_interval,
+                no_retry_exceptions=_NON_RETRYABLE_COMPLETION_ERRORS,
             )
 
             total_time = time.monotonic() - t_start
@@ -235,14 +270,15 @@ class OpenAICompatibleAPI(ModelAPI):
             )
             return output
 
-        except (BadRequestError, UnprocessableEntityError, PermissionDeniedError) as ex:
+        except NON_RETRYABLE_OPENAI_ERRORS as ex:
             return self.handle_bad_request(ex)
         except ValueError as ex:
             logger.error(f'Model [{self.model_name}] returned an invalid response: {ex}')
             raise
 
-    def resolve_tools(self, tools: List[ToolInfo], tool_choice: ToolChoice,
-                      config: GenerateConfig) -> Tuple[List[ToolInfo], ToolChoice, GenerateConfig]:
+    def resolve_tools(
+        self, tools: List[ToolInfo], tool_choice: ToolChoice, config: GenerateConfig
+    ) -> Tuple[List[ToolInfo], ToolChoice, GenerateConfig]:
         """Provides an opportunity for concrete classes to customize tool resolution."""
         return tools, tool_choice, config
 
@@ -272,8 +308,9 @@ class OpenAICompatibleAPI(ModelAPI):
         """Hook for subclasses to do custom response handling."""
         pass
 
-    def chat_choices_from_completion(self, completion: ChatCompletion,
-                                     tools: List[ToolInfo]) -> List[ChatCompletionChoice]:
+    def chat_choices_from_completion(
+        self, completion: ChatCompletion, tools: List[ToolInfo]
+    ) -> List[ChatCompletionChoice]:
         """Hook for subclasses to do custom chat choice processing."""
         return chat_choices_from_openai(completion, tools)
 

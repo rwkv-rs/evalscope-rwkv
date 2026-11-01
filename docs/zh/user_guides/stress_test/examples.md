@@ -1,6 +1,6 @@
 # 使用示例
 
-本文按「压测对象 → 输入数据 → 请求参数 → 负载模式 → 结果观测」的顺序给出可直接复制运行的命令。完整参数含义见[参数说明](./parameters.md)，多轮对话场景见[多轮对话压测](./multi_turn.md)。
+本文按“压测对象 → 输入数据 → 请求参数 → 负载模式 → 结果观测”的顺序给出可直接复制运行的命令。完整参数含义见[参数说明](./parameters.md)，多轮对话场景见[多轮对话压测](./multi_turn.md)。
 
 ## 本地模型推理
 
@@ -66,7 +66,7 @@ evalscope perf \
 
 ### 随机数据集
 
-根据 `prefix-length`、`max-prompt-length` 和 `min-prompt-length` 随机生成 prompt，必需指定 `tokenizer-path`。生成 prompt 的 token 数量在 `prefix_length + min-prompt-length` 和 `prefix_length + max-prompt-length` 之间均匀分布，在一次测试中所有请求 prefix 部分相同。
+根据 `prefix-length`、`max-prompt-length` 和 `min-prompt-length` 随机生成 prompt，必需指定 `tokenizer-path`。生成 prompt 的 token 数量在 `prefix_length + min-prompt-length` 和 `prefix_length + max-prompt-length` 之间均匀分布，默认每轮生成一个共享原始 token 前缀（`--prefix-count 1`）。设置 `--prefix-count 7` 可生成七个不同前缀，每个长度为 `--prefix-length` 个 token；每条请求按 `request_index % 7` 使用其中一个。parallel/rate 多轮测试和 SLA 搜索的每轮均独立生成前缀池。
 
 ```{note}
 由于 chat_template 以及 tokenize 算法的影响，生成的 prompt 的 token 数量可能有些误差，不是精确的指定 token 数量。
@@ -82,6 +82,7 @@ evalscope perf \
   --min-tokens 128 \
   --max-tokens 128 \
   --prefix-length 64 \
+  --prefix-count 7 \
   --min-prompt-length 1024 \
   --max-prompt-length 2048 \
   --number 100 \
@@ -92,8 +93,14 @@ evalscope perf \
 ```{note}
 若需要服务端收到的 token 数与配置精确匹配，可加上 `--tokenize-prompt` 参数。该参数将 prompt 在客户端 tokenize 为 token ID 列表后直接通过 `/v1/completions` 的 `prompt` 字段发送，绕过服务端的重新 tokenize。
 
-服务端将收到恰好 `prefix_length + inner_seq_length` 个 token，落在 `[min-prompt-length, max-prompt-length]` 范围内。适用于 vLLM、SGLang、LMDeploy 等支持接收 token ID 的推理框架；不支持 `random_vl` 数据集。
+服务端将收到恰好 `prefix_length + inner_seq_length` 个 token，落在 `[prefix_length + min-prompt-length, prefix_length + max-prompt-length]` 范围内。min/max prompt length 参数保持现有含义，池大小不会改变这些范围。适用于 vLLM、SGLang、LMDeploy 等支持接收 token ID 的推理框架；不支持 `random_vl` 数据集。
 ```
+
+前缀池通过顶层 `--prefix-count` / Python `Arguments.prefix_count` 配置，不放入 `--dataset-args`。构造 100 条请求、七个前缀时，两组使用 15 次、五组使用 14 次；98 条请求时每组使用 14 次。warmup 和正式请求连续轮转，任意连续构造区间（包括正式请求区间）中各组数量差最多为 1。请求少于前缀数量时允许部分前缀未使用。过滤、失败或提前停止后的成功请求分布可能改变。
+
+保证针对**原始 token ID**。文本和 chat messages 路径中的 decode、重新分词时的拼接边界合并及长度修正，可能改变前 `prefix_length` 个 token，同组请求也不例外。chat template 还会添加自己的头部 token；不同原始前缀可能解码为相同文本。如需精确的输入 token 前缀，请使用 `--tokenize-prompt`、兼容的 completions 服务及与服务端一致的 tokenizer 词表。
+
+七个前缀不代表缓存命中率为 1/7。实际 prefix-cache 命中取决于服务端机制、缓存容量和淘汰、请求时序。闭环测试连续调度 warmup 和正式请求，因此 warmup 覆盖全部前缀不保证这些请求在正式请求开始前已经完成。开环测试已有等待 warmup 请求全部完成后再发送正式请求的阶段，但请求完成仍不保证所有前缀继续驻留缓存。本功能保持这两种调度行为不变。
 
 ### 随机图文数据集
 
@@ -260,6 +267,10 @@ evalscope perf \
 
 预热请求使用与正式压测相同的并发和速率发送，但**不计入性能指标**（延迟、吞吐、百分位等均排除预热数据）。
 
+在闭环（closed-loop）模式下，预热还承担另一项同等重要的职责：吸收压测启动时的瞬时冲击。若不开启预热，最初的 `--parallel` 个请求会在同一时刻被一起放出、打在空载的服务端上，彼此的 prefill 相互排队，测得的 TTFT 在后续压测中不会再复现。开启预热后，这一冲击由预热请求承担，且调度器会把并发槽位**直接交接**给正式请求、中间不排空——每个预热请求完成时恰好放出一个正式请求，而此时服务端已处于繁忙状态。因此正式压测的第一个请求，面对的就已经是满载运行中的服务端。这一点直接决定了分位数是否可信：若不开预热，最初 `--parallel` 个请求偏高的 TTFT 会和后面的正常请求一起参与分位数计算——只要 `--parallel / --number` 超过 1%，`p99` 就完全由这批启动请求决定。
+
+这种交接只在每个并发槽位都被预热请求占满时才成立，因此闭环模式下 `--warmup-num` 应至少取 `--parallel`；取值不足时压测会打印告警并直接指明应填的值。若服务端还需吸收真正的冷启动开销，或你同时关注分位表中的 `max` 一列，可以取更大的值（如 `2 × --parallel`）。
+
 **绝对数量模式**：`--warmup-num` 取 `>= 1` 的整数，表示预热请求的绝对条数。
 
 ```bash
@@ -296,8 +307,9 @@ evalscope perf \
 **注意事项**
 
 - 预热请求与正式请求使用相同的数据集和请求参数。
-- 预热期间的进度条会单独显示（`Warmup[...]`），完成后自动切换到正式压测进度条（`Processing[...]`）。
-- 多轮对话模式下，`--warmup-num` 表示预热的对话数量（与 `--number` 语义一致），预热对话内的所有 turn 均不计入指标。
+- 预热期间会单独显示进度条（`Warmup[...]`），与正式压测进度条（`Processing[...]`）并存。闭环模式下两者会短暂重叠，因为最后几个预热响应会在首批正式请求发出之后才返回。
+- `--duration` 以第一个正式请求**真正发出**的时刻为起点计时，预热不会占用计时预算。
+- 多轮对话模式下，`--warmup-num` 表示预热的对话数量（与 `--number` 语义一致），预热对话内的所有 turn 均不计入指标。上述关于 `--parallel` 的建议仅适用于闭环单轮压测：开环模式按到达速率节奏发送，多轮模式统计的是对话数而非请求数。
 ```
 
 ### Open-loop 开放环路

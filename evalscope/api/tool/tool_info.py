@@ -1,24 +1,28 @@
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Literal, Optional, TypeAlias, Union, get_args, get_type_hints
+from typing import Any, Callable, Dict, List, Literal, Optional, TypeAlias, Union, get_args
 
 from docstring_parser import Docstring, parse
 from pydantic import BaseModel, Field, field_validator
 
-from evalscope.utils.json_schema import JSONSchema, JSONType, json_schema, python_type_to_json_type
+from evalscope.utils.json_schema import (
+    JSONSchema,
+    JSONType,
+    json_schema,
+    python_type_to_json_type,
+    resolve_type_hints,
+)
 
 ToolParam: TypeAlias = JSONSchema
 """Description of tool parameter in JSON Schema format."""
 
 
 class Tool:
-
     def __call__(
         self,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 class ToolParams(BaseModel):
@@ -95,7 +99,7 @@ class ToolInfo(BaseModel):
 def parse_tool_info(func: Callable[..., Any]) -> ToolInfo:
     # tool may already have registry attributes w/ tool info
     description = tool_description(func)
-    if (description.name and description.description and description.parameters is not None):
+    if description.name and description.description and description.parameters is not None:
         return ToolInfo(
             name=description.name,
             description=description.description,
@@ -103,7 +107,7 @@ def parse_tool_info(func: Callable[..., Any]) -> ToolInfo:
         )
 
     signature = inspect.signature(func)
-    type_hints = get_type_hints(func)
+    type_hints = resolve_type_hints(func)
     docstring = inspect.getdoc(func)
     parsed_docstring: Optional[Docstring] = parse(docstring) if docstring else None
 

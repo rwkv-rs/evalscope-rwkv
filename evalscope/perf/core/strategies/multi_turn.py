@@ -1,12 +1,12 @@
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 
 from evalscope.perf.arguments import Arguments
 from evalscope.perf.core.strategies.base import BenchmarkStrategy
-from evalscope.perf.plugin.datasets.base import Conversation, Message, Turn
+from evalscope.perf.plugin.datasets.base import Conversation, Message
 from evalscope.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -46,31 +46,31 @@ class MultiTurnStrategy(BenchmarkStrategy):
         super().__init__(args, api_plugin, client, queue)
         self._all_conversations = all_conversations
         # Conversation cycling index – safe without a lock because asyncio is
-        # single-threaded/cooperative.  Continuous across phases so warmup
-        # consumes the first ``warmup_count`` conversations and benchmark
-        # picks up from there (preserves dataset uniqueness contract).
+        # single-threaded/cooperative.  Warmup and benchmark still pull disjoint
+        # conversations from the dataset; the hand-off fix changes only when
+        # workers move from warmup work to measured work, not which conversations
+        # are measured.
         self._conv_index = 0
         self._warmup_count = self.args.warmup_count
 
-        # Per-phase dispatch state.  Reset at the start of every phase by
-        # ``_run_phase``.  ``_phase_counter`` tracks how many conversations
-        # this phase has already claimed; ``_phase_budget`` caps that count;
-        # ``_phase_is_warmup`` tags every enqueued ``BenchmarkData``;
-        # ``_phase_deadline`` is the trace-soft-exit cutoff (None disables it).
+        # Shared dispatch state.  ``_phase_counter`` claims work items from one
+        # ordered stream: first ``_phase_warmup_budget`` warmup conversations,
+        # then measured conversations up to ``_phase_budget``.  ``_phase_duration``
+        # is armed lazily when the first measured conversation is claimed so
+        # warmup does not consume the timed budget.
         self._phase_counter = 0
         self._phase_budget = 0
+        self._phase_warmup_budget = 0
         self._phase_is_warmup = False
         self._phase_deadline: Optional[float] = None
+        self._phase_duration: Optional[float] = None
 
         # Trace identity:  monotonic across phases; each claimed conversation
         # gets a unique ``trace_id`` string for trace-level metric aggregation.
         self._next_trace_seq = 0
 
         if self._warmup_count > 0:
-            logger.info(
-                f'Warmup enabled: {self._warmup_count} warmup conversations '
-                f'(benchmark: {self.args.number})'
-            )
+            logger.info(f'Warmup enabled: {self._warmup_count} warmup conversations (benchmark: {self.args.number})')
 
     def _next_conversation(self) -> Conversation:
         """Return the next conversation from the cycled pool."""
@@ -82,23 +82,28 @@ class MultiTurnStrategy(BenchmarkStrategy):
         """Allocate a unique trace_id string for one claimed conversation."""
         seq = self._next_trace_seq
         self._next_trace_seq += 1
-        return f"{'warmup' if is_warmup else 'bench'}-{seq}"
+        return f'{"warmup" if is_warmup else "bench"}-{seq}'
 
     async def _worker(self, worker_id: int) -> None:
-        """Process conversations until the current phase budget is reached."""
+        """Process conversations until the current work stream is exhausted."""
         while True:
-            # Trace-level soft exit: stop claiming new conversations once the
-            # duration deadline has elapsed.  An already-claimed conversation
-            # below will still run all its remaining turns to completion so
-            # trace-level metrics stay coherent (matches trie's semantics).
-            if self._phase_deadline is not None and time.perf_counter() >= self._phase_deadline:
-                return
             # Atomically claim a conversation slot before awaiting to prevent
-            # other workers from overshooting the phase budget.
+            # other workers from overshooting the stream budget.
             if self._phase_counter >= self._phase_budget:
                 return
+            work_index = self._phase_counter
+            is_warmup = work_index < self._phase_warmup_budget
+
+            # Trace-level soft exit: warmup is exempt.  The measured deadline is
+            # armed by the first measured conversation claim, which keeps all
+            # warmup service time outside the measured window.
+            if not is_warmup:
+                if self._phase_deadline is not None and time.perf_counter() >= self._phase_deadline:
+                    return
+                if self._phase_deadline is None and self._phase_duration is not None:
+                    self._phase_deadline = self._compute_deadline(self._phase_duration)
+
             self._phase_counter += 1
-            is_warmup = self._phase_is_warmup
             conversation = self._next_conversation()
             trace_id = self._next_trace_id(is_warmup)
 
@@ -114,6 +119,7 @@ class MultiTurnStrategy(BenchmarkStrategy):
             prev_prompt_tokens: int = 0
             prev_completion_tokens: int = 0
             total_turns = len(conversation)
+            rid = conversation[0].rid
 
             for turn_idx, turn in enumerate(conversation):
                 # turn: Turn – delta messages plus optional per-turn overrides.
@@ -149,19 +155,20 @@ class MultiTurnStrategy(BenchmarkStrategy):
                 request = self.api_plugin.build_request(list(context))
                 if request is None:
                     logger.error(
-                        f'worker={worker_id} turn={turn_idx}: build_request returned None; '
-                        'abandoning conversation.'
+                        f'worker={worker_id} turn={turn_idx}: build_request returned None; abandoning conversation.'
                     )
                     break
                 if turn.max_tokens is not None:
-                    request['max_tokens'] = turn.max_tokens
+                    self.api_plugin.set_request_max_tokens(request, turn.max_tokens)
+                if rid:
+                    request.setdefault('rid', f'{rid}_t{turn_idx + 1}')
                 benchmark_data = await self.client.post(request)
 
                 # Inject multi-turn specific metadata.
                 benchmark_data.is_warmup = is_warmup
                 benchmark_data.input_num_turns = turn_idx + 1
                 benchmark_data.trace_id = trace_id
-                benchmark_data.is_first_turn = (turn_idx == 0)
+                benchmark_data.is_first_turn = turn_idx == 0
 
                 # Ensure token counts are available before computing cache ratio.
                 # Some OpenAI-compatible servers omit ``usage`` in the stream, so
@@ -212,46 +219,69 @@ class MultiTurnStrategy(BenchmarkStrategy):
 
                 if not benchmark_data.success:
                     logger.debug(
-                        f'worker={worker_id} turn={turn_idx} '
-                        f'failed ({benchmark_data.error}), abandoning conversation.'
+                        f'worker={worker_id} turn={turn_idx} failed ({benchmark_data.error}), abandoning conversation.'
                     )
                     break
 
                 # Append real response to context for next turn.
-                context.append({
-                    'role': 'assistant',
-                    'content': benchmark_data.generated_text,
-                })
+                context.append(
+                    {
+                        'role': 'assistant',
+                        'content': benchmark_data.generated_text,
+                    }
+                )
 
     async def run(self) -> None:
-        # Two-phase dispatch: warmup conversations complete in full before any
-        # benchmark conversation starts.  ``_conv_index`` persists across
-        # phases so warmup and benchmark pull disjoint conversations from the
-        # dataset (first ``warmup_count`` vs. the rest).
-        if self._warmup_count > 0:
-            # Warmup ignores --duration (warmup must finish in full before
-            # the timed benchmark window begins, mirroring trie's model).
-            await self._run_phase(budget=self._warmup_count, is_warmup=True, deadline=None)
+        self._log_warmup_handoff()
         await self._run_phase(
-            budget=self.args.number,
+            budget=self._warmup_count + self.args.number,
             is_warmup=False,
-            deadline=self._compute_deadline(self.args.duration),
+            warmup_budget=self._warmup_count,
+            duration=self.args.duration,
         )
 
-    async def _run_phase(self, budget: int, is_warmup: bool, deadline: Optional[float] = None) -> None:
-        """Spawn ``args.parallel`` workers and drain them within one phase.
+    def _log_warmup_handoff(self) -> None:
+        """Warn when warmup cannot cover the opening multi-turn cohort."""
+        if self.args.parallel <= 1:
+            return
+        if self._warmup_count <= 0:
+            logger.warning(
+                'Multi-turn warmup is disabled; the first measured cohort may start against an idle server. '
+                f'Use --warmup-num {self.args.parallel} or higher to cover every concurrency slot.'
+            )
+            return
+        if self._warmup_count < self.args.parallel:
+            uncovered = self.args.parallel - self._warmup_count
+            logger.warning(
+                f'Multi-turn warmup covers only {self._warmup_count} of the {self.args.parallel} '
+                f'concurrency slots; {uncovered} measured conversation(s) may still be released '
+                'in the opening cohort.'
+            )
 
-        When ``deadline`` is set, workers stop claiming new conversations once
-        wall-clock crosses it, but any conversation already in progress is
-        allowed to finish all its turns (trace-level soft exit, matches trie).
-        ``budget`` is still honoured as an upper bound on the number of
-        conversations claimed; whichever limit (count or wall-clock) is hit
-        first ends the phase.
+    async def _run_phase(
+        self,
+        budget: int,
+        is_warmup: bool,
+        deadline: Optional[float] = None,
+        warmup_budget: Optional[int] = None,
+        duration: Optional[float] = None,
+    ) -> None:
+        """Spawn ``args.parallel`` workers and drain one ordered work stream.
+
+        By default this keeps the historical single-phase behaviour used by
+        lifecycle tests.  ``warmup_budget`` turns the phase into a hand-off
+        stream: the first N claimed conversations are warmup, and following
+        claims are measured without stopping the workers in between.
         """
         self._phase_counter = 0
         self._phase_budget = budget
+        if warmup_budget is None and is_warmup:
+            self._phase_warmup_budget = budget
+        else:
+            self._phase_warmup_budget = warmup_budget or 0
         self._phase_is_warmup = is_warmup
         self._phase_deadline = deadline
+        self._phase_duration = duration
         workers = [asyncio.create_task(self._worker(worker_id=i)) for i in range(self.args.parallel)]
         try:
             await asyncio.gather(*workers)
@@ -260,3 +290,5 @@ class MultiTurnStrategy(BenchmarkStrategy):
                 if not worker.done():
                     worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+            self._phase_duration = None
+            self._phase_warmup_budget = 0

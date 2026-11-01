@@ -75,6 +75,7 @@ SUBSET_LIST = list(SUBJECT_MAPPING.keys())
 @register_benchmark(
     BenchmarkMeta(
         name='mmlu_redux',
+        evaluation_version='v1.1',
         pretty_name='MMLU-Redux',
         tags=[Tags.MULTIPLE_CHOICE, Tags.KNOWLEDGE],
         description="""
@@ -108,12 +109,9 @@ MMLU-Redux is an improved version of the MMLU benchmark with corrected answers. 
 - Results aggregated by subject and category (STEM, Humanities, Social Science, Other)
 """,  # noqa: E501
         dataset_id='AI-ModelScope/mmlu-redux-2.0',
+        hf_dataset_id='edinburgh-dawg/mmlu-redux-2.0',
         subset_list=SUBSET_LIST,
-        metric_list=[{
-            'acc': {
-                'allow_inclusion': True
-            }
-        }],
+        metric_list=[{'acc': {'allow_inclusion': True}}],
         few_shot_num=0,
         train_split=None,
         eval_split='test',
@@ -121,7 +119,6 @@ MMLU-Redux is an improved version of the MMLU benchmark with corrected answers. 
     )
 )
 class MMLUReduxAdapter(MultiChoiceAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -146,7 +143,8 @@ class MMLUReduxAdapter(MultiChoiceAdapter):
             correct_answer = correct_answer.strip('()')
             try:
                 correct_answer = correct_answer.replace(' and ', ',').replace(' or ', ',')
-                target_index_list = list(map(int, correct_answer.split(',')))
+                # Annotators separate the indices with commas or spaces ('1, 3', '0 1 3').
+                target_index_list = list(map(int, correct_answer.replace(',', ' ').split()))
             except ValueError:
                 try:
                     target_index_list = [ord(c) - ord('A') for c in correct_answer.split(',')]

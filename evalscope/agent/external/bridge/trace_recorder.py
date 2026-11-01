@@ -135,6 +135,38 @@ class BridgeTraceRecorder:
             messages_key='contents',
         )
 
+    def record_turn_failure(
+        self,
+        *,
+        mode: str,
+        exc: BaseException,
+        latency_ms: Optional[float] = None,
+    ) -> None:
+        """Append an ``ERROR`` event for a generate call that produced no output.
+
+        Recorded at the step the attempt *would* have occupied (``_step + 1``)
+        without advancing ``_step``: the turn produced no assistant message, and
+        the agent client's retry -- once it succeeds -- claims that same step.
+        The failed attempt therefore sits next to the retry that replaced it
+        rather than shifting every later step by one.
+
+        Without this the trace only ever shows attempts that succeeded, so a run
+        served by a flaky endpoint reads as shorter and cheaper than the same run
+        on a stable one, and per-turn latency / token totals silently under-count.
+        """
+        with self._lock:
+            self._trace.add_event(
+                step=self._step + 1,
+                type=EventType.ERROR,
+                latency_ms=latency_ms,
+                payload={
+                    'source': 'upstream',
+                    'mode': mode,
+                    'error': type(exc).__name__,
+                    'message': f'{type(exc).__name__}: {str(exc)[:200]}',
+                },
+            )
+
     def _record_turn(
         self,
         request_body: Dict[str, Any],
@@ -174,10 +206,7 @@ class BridgeTraceRecorder:
                         step=next_step,
                         type=EventType.TOOL_RESULT,
                         message_id=msg.id,
-                        payload={
-                            'id': tc_id,
-                            'error': 'unknown' if is_error else None
-                        },
+                        payload={'id': tc_id, 'error': 'unknown' if is_error else None},
                     )
 
             self._step += 1
@@ -204,11 +233,7 @@ class BridgeTraceRecorder:
                     step=self._step,
                     type=EventType.TOOL_CALL,
                     message_id=assistant_msg.id,
-                    payload={
-                        'name': name,
-                        'arguments': args,
-                        'id': tc.id
-                    },
+                    payload={'name': name, 'arguments': args, 'id': tc.id},
                 )
 
     def record_run_start(self, *, framework: str, cmd_summary: str) -> None:
@@ -389,9 +414,7 @@ class BridgeTraceRecorder:
             'local_shell_call_output',
         }
         already_recorded = {
-            m.tool_call_id
-            for m in self._messages
-            if isinstance(m, ChatMessageTool) and m.tool_call_id is not None
+            m.tool_call_id for m in self._messages if isinstance(m, ChatMessageTool) and m.tool_call_id is not None
         }
         new_entries: List[Dict[str, Any]] = []
         for entry in items:
@@ -488,21 +511,21 @@ class BridgeTraceRecorder:
 
     @staticmethod
     def _build_assistant_message(output: ModelOutput) -> ChatMessageAssistant:
+        """Deep-copy model output while normalizing tool calls for the transcript."""
         if not output.choices:
             return ChatMessageAssistant(content='')
         src = output.message
         tool_calls: List[ToolCall] = []
         for tc in src.tool_calls or []:
             name, args = unpack_tool_call(tc)
-            tool_calls.append(ToolCall(
-                id=tc.id,
-                function=ToolFunction(name=name, arguments=args),
-                type='function',
-            ))
-        return ChatMessageAssistant(
-            content=src.text or '',
-            tool_calls=tool_calls or None,
-        )
+            tool_calls.append(
+                ToolCall(
+                    id=tc.id,
+                    function=ToolFunction(name=name, arguments=args),
+                    type='function',
+                )
+            )
+        return src.model_copy(deep=True, update={'tool_calls': tool_calls or None})
 
 
 def _user_text_from_content(content: Any) -> str:

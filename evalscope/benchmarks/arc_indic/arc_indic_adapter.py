@@ -55,6 +55,7 @@ multilingual scientific reasoning.
 - Same underlying science-exam questions as `arc` (Challenge split), machine/human translated per language
 """,
         dataset_id='sarvamai/arc-challenge-indic',
+        hf_dataset_id='sarvamai/arc-challenge-indic',
         metric_list=['acc'],
         subset_list=SUBSET_LIST,
         few_shot_num=0,
@@ -64,7 +65,6 @@ multilingual scientific reasoning.
     )
 )
 class ARCIndicAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         choice_texts = record['choices']['text']
         answer_key = record['answerKey']

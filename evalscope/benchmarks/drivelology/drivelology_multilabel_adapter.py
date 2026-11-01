@@ -1,4 +1,3 @@
-import re
 from typing import Any, Dict, List
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -8,10 +7,7 @@ from evalscope.api.messages import ChatMessageUser, ContentText
 from evalscope.api.metric.scorer import AggScore, SampleScore, Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
-from evalscope.utils.logger import get_logger
-from evalscope.utils.multi_choices import prompt
-
-logger = get_logger()
+from evalscope.utils.multi_choices import parse_answers, prompt
 
 DESCRIPTION = """
 ## Overview
@@ -37,6 +33,7 @@ Drivelology Multi-label Classification evaluates models' ability to categorize "
 
 - Default configuration uses **0-shot** evaluation
 - Metrics: F1 (weighted, micro, macro), Exact Match
+- The labels on the last `ANSWER:` line are read as listed: `AD`, `A, D` or `A and D`
 - Aggregation method: F1 weighted
 - Categories: inversion, wordplay, switchbait, paradox, misdirection
 """
@@ -74,10 +71,10 @@ The entire content of your response should be of the following format: 'ANSWER: 
         aggregation='f1_weighted',
         eval_split='test',
         prompt_template='{question}',
+        evaluation_version='v1.1',
     )
 )
 class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.categories = ['inversion', 'wordplay', 'switchbait', 'paradox', 'misdirection']
@@ -103,13 +100,7 @@ class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
         )
 
     def extract_answer(self, prediction: str, task_state: TaskState) -> str:
-        pattern = r'ANSWER:\s*([A-E]+)'
-        matches = re.findall(pattern, prediction)
-        if not matches:
-            logger.warning(f'Could not extract answer from: {prediction}')
-            return ''
-        letters = matches[-1].strip().upper()
-        return ''.join(sorted(set(letters)))
+        return ''.join(sorted(parse_answers(task_state, multiple_correct=True, completion=prediction)))
 
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
@@ -163,7 +154,7 @@ class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
                 'tp': 1 if in_pred and in_target else 0,
                 'fp': 1 if in_pred and not in_target else 0,
                 'fn': 1 if not in_pred and in_target else 0,
-                'support': 1 if in_target else 0
+                'support': 1 if in_target else 0,
             }
 
         # Set simple numerical values in score.value as expected by the API
@@ -190,7 +181,7 @@ class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
                 AggScore(metric_name='f1_weighted', score=0.0, num=0, metadata={}),
                 AggScore(metric_name='f1_micro', score=0.0, num=0, metadata={}),
                 AggScore(metric_name='f1_macro', score=0.0, num=0, metadata={}),
-                AggScore(metric_name='exact_match', score=0.0, num=0, metadata={})
+                AggScore(metric_name='exact_match', score=0.0, num=0, metadata={}),
             ]
 
         # Initialize category statistics
@@ -237,9 +228,11 @@ class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
 
         micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
         micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
-        f1_micro = 2 * micro_precision * micro_recall / (micro_precision + micro_recall) if (
-            micro_precision + micro_recall
-        ) > 0 else 0.0
+        f1_micro = (
+            2 * micro_precision * micro_recall / (micro_precision + micro_recall)
+            if (micro_precision + micro_recall) > 0
+            else 0.0
+        )
 
         # Calculate macro-average F1 (simple average of category F1 scores)
         f1_macro = f1_sum / len(self.categories) if self.categories else 0.0
@@ -261,12 +254,9 @@ class DrivelologyMultilabelClassificationAdapter(DefaultDataAdapter):
                 metric_name='f1_weighted',
                 score=f1_weighted,
                 num=num_samples,
-                metadata={'category_f1': {
-                    cat: f1
-                    for cat, f1 in category_f1.items()
-                }}
+                metadata={'category_f1': {cat: f1 for cat, f1 in category_f1.items()}},
             ),
             AggScore(metric_name='f1_micro', score=f1_micro, num=num_samples, metadata={}),
             AggScore(metric_name='f1_macro', score=f1_macro, num=num_samples, metadata={}),
-            AggScore(metric_name='exact_match', score=exact_match, num=num_samples, metadata={})
+            AggScore(metric_name='exact_match', score=exact_match, num=num_samples, metadata={}),
         ]

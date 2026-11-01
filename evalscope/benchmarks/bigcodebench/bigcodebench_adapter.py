@@ -13,6 +13,16 @@ from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
 
+# Mirrors the official harness: load only TestCases and fail on any failure or error.
+_RUN_TEST_CASES = """
+
+import sys as _sys
+import unittest as _unittest
+
+_result = _unittest.TextTestRunner().run(_unittest.defaultTestLoader.loadTestsFromTestCase(TestCases))
+_sys.exit(0 if _result.wasSuccessful() else 1)
+"""
+
 DESCRIPTION = """
 ## Overview
 
@@ -76,41 +86,34 @@ _EXTRA_PARAMS = {
         'type': 'str',
         'description': 'Evaluation mode: "complete" (docstring completion) or "instruct" (NL instruction).',
         'value': 'instruct',
-        'choices': ['complete', 'instruct']
+        'choices': ['complete', 'instruct'],
     },
     'version': {
         'type': 'str',
         'description': 'Dataset version. Use "default" for the latest available version.',
-        'value': 'default'
+        'value': 'default',
     },
     'calibrate': {
         'type': 'bool',
         'description': 'Whether to prepend code_prompt to the solution for function signature alignment.',
-        'value': True
+        'value': True,
     },
     'docker_build_context': {
         'type': 'str',
         'description': 'Optional local Docker build context. When set, overrides the default sandbox image.',
-        'value': ''
+        'value': '',
     },
-    'dockerfile': {
-        'type': 'str',
-        'description': 'Dockerfile path inside docker_build_context.',
-        'value': 'Dockerfile'
-    },
+    'dockerfile': {'type': 'str', 'description': 'Dockerfile path inside docker_build_context.', 'value': 'Dockerfile'},
     'force_rebuild': {
         'type': 'bool',
         'description': 'Force rebuilding the optional local Docker image.',
-        'value': False
-    }
+        'value': False,
+    },
 }
 
 _SANDBOX_CONFIG = {
     'image': 'bigcodebench/bigcodebench-evaluate:latest',
-    'tools_config': {
-        'shell_executor': {},
-        'python_executor': {}
-    },
+    'tools_config': {'shell_executor': {}, 'python_executor': {}},
     'memory_limit': '4g',
 }
 
@@ -122,6 +125,7 @@ _SANDBOX_CONFIG = {
         tags=[Tags.CODING],
         description=DESCRIPTION,
         dataset_id='evalscope/bigcodebench',
+        hf_dataset_id='bigcode/bigcodebench',
         subset_list=['default'],
         metric_list=['acc'],
         aggregation='mean_and_pass_at_k',
@@ -131,6 +135,7 @@ _SANDBOX_CONFIG = {
         review_timeout=240,
         extra_params=_EXTRA_PARAMS,
         sandbox_config=_SANDBOX_CONFIG,
+        evaluation_version='v1.1',
     )
 )
 class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
@@ -174,7 +179,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
                 'complete_prompt': record['complete_prompt'],
                 'code_prompt': record['code_prompt'],
                 'test': record['test'],
-            }
+            },
         )
 
     def extract_answer(self, prediction: str, task_state: TaskState) -> str:
@@ -208,8 +213,9 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         if self._calibrate:
             solution = problem['code_prompt'] + '\n    pass\n' + solution
 
-        # Construct full test program: solution + unittest test class
-        check_program = solution + '\n' + problem['test']
+        # Construct full test program: solution + unittest test class. The dataset's test only defines
+        # TestCases, so run it explicitly (as the official harness does) and exit non-zero on any failure.
+        check_program = solution + '\n' + problem['test'] + _RUN_TEST_CASES
 
         # Execute in sandbox
         res = self.execute_code_in_sandbox(code=check_program, timeout=self.review_timeout, language='python')
@@ -234,6 +240,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         tags=[Tags.CODING],
         description=HARD_DESCRIPTION,
         dataset_id='evalscope/bigcodebench-hard',
+        hf_dataset_id='bigcode/bigcodebench-hard',
         subset_list=['default'],
         metric_list=['acc'],
         aggregation='mean_and_pass_at_k',
@@ -243,6 +250,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         review_timeout=240,
         extra_params=_EXTRA_PARAMS,
         sandbox_config=_SANDBOX_CONFIG,
+        evaluation_version='v1.1',
     )
 )
 class BigCodeBenchHardAdapter(BigCodeBenchAdapter):
@@ -250,4 +258,5 @@ class BigCodeBenchHardAdapter(BigCodeBenchAdapter):
     BigCodeBench-Hard adapter. Inherits all logic from BigCodeBenchAdapter.
     Uses the curated hard subset (148 tasks) of BigCodeBench.
     """
+
     pass

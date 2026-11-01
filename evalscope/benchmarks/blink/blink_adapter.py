@@ -15,9 +15,20 @@ Answer the following multiple choice question. The last line of your response sh
 """.strip()
 
 SUBSET_LIST = [
-    'Art_Style', 'Counting', 'Forensic_Detection', 'Functional_Correspondence', 'IQ_Test', 'Jigsaw',
-    'Multi-view_Reasoning', 'Object_Localization', 'Relative_Depth', 'Relative_Reflectance', 'Semantic_Correspondence',
-    'Spatial_Relation', 'Visual_Correspondence', 'Visual_Similarity'
+    'Art_Style',
+    'Counting',
+    'Forensic_Detection',
+    'Functional_Correspondence',
+    'IQ_Test',
+    'Jigsaw',
+    'Multi-view_Reasoning',
+    'Object_Localization',
+    'Relative_Depth',
+    'Relative_Reflectance',
+    'Semantic_Correspondence',
+    'Spatial_Relation',
+    'Visual_Correspondence',
+    'Visual_Similarity',
 ]
 
 
@@ -54,6 +65,7 @@ BLINK is a benchmark designed to evaluate the core visual perception abilities o
 - Results can be analyzed across 14 different perception categories
 """,  # noqa: E501
         dataset_id='evalscope/BLINK',
+        hf_dataset_id='BLINK-Benchmark/BLINK',
         subset_list=SUBSET_LIST,
         metric_list=['acc'],
         eval_split='val',

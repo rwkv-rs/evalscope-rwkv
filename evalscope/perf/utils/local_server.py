@@ -20,8 +20,14 @@ async def lifespan(app: FastAPI):
     yield
     try:
         import torch
-        if torch.cuda.is_available():
+
+        from evalscope.utils.model_utils import get_device
+
+        device = get_device()
+        if device == 'cuda' and torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif device == 'npu' and hasattr(torch, 'npu') and torch.npu.is_available():
+            torch.npu.empty_cache()
     except ImportError:
         pass
 
@@ -67,15 +73,25 @@ def start_app(args: Arguments):
     elif args.api == 'local_vllm':
         import torch
 
+        from evalscope.utils.model_utils import get_device
+
         os.environ['VLLM_USE_MODELSCOPE'] = 'True'
         os.environ['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = '1'
         os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        # yapf: disable
+
+        device = get_device()
+        if device == 'cuda' and torch.cuda.is_available():
+            tp_size = torch.cuda.device_count()
+        elif device == 'npu' and hasattr(torch, 'npu') and torch.npu.is_available():
+            tp_size = torch.npu.device_count()
+        else:
+            tp_size = 1
+        # fmt: off
         proc = subprocess.Popen([
             'python', '-m', 'vllm.entrypoints.openai.api_server',
             '--model', args.model,
             '--served-model-name', args.model,
-            '--tensor-parallel-size', str(torch.cuda.device_count()),
+            '--tensor-parallel-size', str(tp_size),
             '--max-model-len', '32768',
             '--gpu-memory-utilization', '0.9',
             '--host', '0.0.0.0',
@@ -84,7 +100,7 @@ def start_app(args: Arguments):
             '--disable-log-requests',
             '--disable-log-stats',
         ])
-        # yapf: enable
+        # fmt: on
         import atexit
 
         def on_exit():

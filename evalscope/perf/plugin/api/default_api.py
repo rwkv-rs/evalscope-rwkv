@@ -15,6 +15,48 @@ from evalscope.utils.logger import get_logger
 logger = get_logger()
 
 
+def _parse_chat_delta(delta: Any) -> tuple[str, bool]:
+    """Return concatenable text and whether a chat delta carries observable output."""
+    if not isinstance(delta, dict):
+        return '', False
+
+    content_value = delta.get('content')
+    content = content_value if isinstance(content_value, str) else ''
+
+    reasoning_value = delta.get('reasoning_content')
+    if not isinstance(reasoning_value, str) or not reasoning_value:
+        reasoning_value = delta.get('reasoning')
+    reasoning = reasoning_value if isinstance(reasoning_value, str) else ''
+
+    text = content + reasoning
+    if text:
+        return text, True
+
+    # Structured reasoning must only affect timing: providers disagree on whether
+    # these values are incremental or cumulative, so appending them would corrupt
+    # generated_text. Encrypted payloads and type-only records are metadata.
+    # Tool calls are output as well; like structured reasoning they only affect
+    # timing, since their argument fragments are not text the model returned.
+    tool_calls = delta.get('tool_calls')
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            function = call.get('function') if isinstance(call, dict) else None
+            if isinstance(function, dict) and any(
+                isinstance(function.get(key), str) and function[key] for key in ('name', 'arguments')
+            ):
+                return '', True
+
+    reasoning_details = delta.get('reasoning_details')
+    if isinstance(reasoning_details, list):
+        for detail in reasoning_details:
+            if not isinstance(detail, dict):
+                continue
+            if any(isinstance(detail.get(key), str) and detail[key] for key in ('text', 'summary')):
+                return '', True
+
+    return '', False
+
+
 class StreamedResponseHandler:
     """Handles streaming HTTP responses by accumulating chunks until complete
     messages are available."""
@@ -38,7 +80,9 @@ class StreamedResponseHandler:
         drop continuation lines.
         """
         data_values: list[str] = []
-        for line in message.strip().splitlines():
+        # SSE lines use CR/LF only; splitlines() also splits valid JSON characters
+        # such as U+0085, U+2028, and U+2029.
+        for line in message.strip().split('\n'):
             if line.startswith('data:'):
                 data_values.append(line.removeprefix('data:').lstrip(' '))
 
@@ -118,12 +162,12 @@ class DefaultApiPlugin(ApiPluginBase):
         data = json.dumps(body, ensure_ascii=False)  # serialize to JSON
 
         output = BenchmarkData()
-        ttft = 0.0
         generated_text = ''
         st = time.perf_counter()
         output.start_time = st
         output.request = data
         most_recent_timestamp = st
+        last_output_timestamp: float | None = None
         try:
             async with client_session.post(url=url, data=data, headers=headers) as response:
                 content_type = response.headers.get('Content-Type', '')
@@ -133,7 +177,6 @@ class DefaultApiPlugin(ApiPluginBase):
                         output.is_stream = True
                         handler = StreamedResponseHandler()
                         async for chunk_bytes in response.content.iter_any():
-
                             if not chunk_bytes:
                                 continue
 
@@ -147,42 +190,57 @@ class DefaultApiPlugin(ApiPluginBase):
 
                                 chunk = message.removeprefix('data:').strip()
 
-                                if chunk != '[DONE]':
-                                    timestamp = time.perf_counter()
+                                # Skip non-JSON payloads (stream terminators like "[DONE]"), not data chunks.
+                                try:
                                     data = json.loads(chunk)
+                                except json.JSONDecodeError:
+                                    continue
 
-                                    if choices := data.get('choices'):
-                                        if data.get('object') == 'text_completion':
-                                            content = choices[0].get('text') or ''
-                                        else:
-                                            delta = choices[0].get('delta', {})
-                                            content = (delta.get('content')
-                                                       or '') + (delta.get('reasoning_content') or '')
+                                timestamp = time.perf_counter()
+
+                                # A server that fails after sending HTTP 200 (vLLM, SGLang) reports the error
+                                # in-band as `{"error": {...}}` or `{"object": "error", ...}`.
+                                if data.get('error') is not None or data.get('object') == 'error':
+                                    output.error = json.dumps(data, ensure_ascii=False)
+
+                                if choices := data.get('choices'):
+                                    if data.get('object') == 'text_completion':
+                                        content = choices[0].get('text') or ''
+                                        has_output = bool(content)
+                                    else:
+                                        delta = choices[0].get('delta', {})
+                                        content, has_output = _parse_chat_delta(delta)
+                                    if has_output:
                                         # First token
-                                        if ttft == 0.0:
-                                            ttft = timestamp - st
-                                            output.first_chunk_latency = ttft
+                                        if last_output_timestamp is None:
+                                            output.first_chunk_latency = timestamp - st
 
                                         # Decoding phase
                                         else:
-                                            output.inter_chunk_latency.append(timestamp - most_recent_timestamp)
+                                            output.inter_chunk_latency.append(timestamp - last_output_timestamp)
 
-                                        generated_text += content
-                                        output.response_messages.append(data)
-                                    if usage := data.get('usage'):
-                                        output.prompt_tokens = usage.get('prompt_tokens')
-                                        output.completion_tokens = usage.get('completion_tokens')
-                                        # Extract real cached tokens from prompt_tokens_details
-                                        _details = usage.get('prompt_tokens_details')
-                                        if _details and isinstance(_details, dict):
-                                            _cached = _details.get('cached_tokens')
-                                            if _cached is not None:
-                                                output.real_cached_tokens = _cached
+                                        last_output_timestamp = timestamp
+                                    if last_output_timestamp is not None:
+                                        # An empty delta after the first output is still a decode step
+                                        # (a partial multi-byte token, the EOS step).
+                                        output.n_decode_chunks += 1
 
-                                    most_recent_timestamp = timestamp
+                                    generated_text += content
+                                    output.response_messages.append(data)
+                                if usage := data.get('usage'):
+                                    output.prompt_tokens = usage.get('prompt_tokens')
+                                    output.completion_tokens = usage.get('completion_tokens')
+                                    # Extract real cached tokens from prompt_tokens_details
+                                    _details = usage.get('prompt_tokens_details')
+                                    if _details and isinstance(_details, dict):
+                                        _cached = _details.get('cached_tokens')
+                                        if _cached is not None:
+                                            output.real_cached_tokens = _cached
+
+                                most_recent_timestamp = timestamp
 
                         output.generated_text = generated_text
-                        output.success = True
+                        output.success = output.error is None
                         output.completed_time = most_recent_timestamp
                         output.query_latency = most_recent_timestamp - st
 
@@ -231,7 +289,15 @@ class DefaultApiPlugin(ApiPluginBase):
                             generated_text = str(payload)
 
                         output.generated_text = generated_text
-                        output.success = True
+                        # A server that fails after sending HTTP 200 (vLLM, SGLang) reports
+                        # the error in-band as `{"error": {...}}` or `{"object": "error", ...}`.
+                        # The streaming branch already guards this (see #1906/#1918); the non-stream
+                        # JSON branch must not unconditionally count such a body as success.
+                        if isinstance(payload, dict) and (
+                            payload.get('error') is not None or payload.get('object') == 'error'
+                        ):
+                            output.error = json.dumps(payload, ensure_ascii=False)
+                        output.success = output.error is None
 
                     else:
                         # Unknown successful content-type: read as text

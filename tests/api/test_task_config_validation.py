@@ -1,6 +1,7 @@
 """Tests for unknown-key rejection and the eval_batch_size default resolution."""
 
 import argparse
+import math
 from typing import Optional
 
 import pytest
@@ -130,6 +131,33 @@ def test_cli_omitting_the_flag_keeps_the_api_default() -> None:
     assert config.eval_batch_size == DEFAULT_API_EVAL_BATCH_SIZE
 
 
+def test_cli_accepts_systemone_decision_evaluation() -> None:
+    config = _cli_config(
+        '--model',
+        'decision-model-preview',
+        '--eval-type',
+        'systemone_api',
+        '--api-url',
+        'http://localhost:8000/v1',
+        '--datasets',
+        'open_decisions',
+        'general_decision',
+        '--dataset-args',
+        '{"general_decision": {"local_path": "comments", "subset_list": ["zh_noul"]}}',
+        '--generation-config',
+        '{"timeout": 90, "retries": 1}',
+        '--eval-batch-size',
+        '2',
+    )
+
+    assert config.eval_type == 'systemone_api'
+    assert config.datasets == ['open_decisions', 'general_decision']
+    assert config.dataset_args['general_decision']['subset_list'] == ['zh_noul']
+    assert config.generation_config.timeout == 90
+    assert config.generation_config.retries == 1
+    assert config.eval_batch_size == 2
+
+
 def test_cli_explicit_flag_wins_over_the_api_default() -> None:
     config = _cli_config(
         '--model', 'x', '--api-url', 'http://localhost:8000/v1', '--datasets', 'gsm8k', '--eval-batch-size', '3'
@@ -218,3 +246,25 @@ def test_update_merges_generation_config_and_recoerces() -> None:
     assert merged['top_p'] == 0.9
     assert isinstance(config.sandbox, SandboxTaskConfig)
     assert config.sandbox.engine == 'volcengine'
+
+
+@pytest.mark.parametrize('limit', [2.5, -1, -0.1, math.nan, math.inf])
+def test_invalid_limits_are_rejected(limit: float | int) -> None:
+    with pytest.raises(ValueError, match='limit'):
+        TaskConfig.from_dict({'model': 'x', 'limit': limit})
+
+
+@pytest.mark.parametrize(
+    'limit, expected',
+    [
+        (None, None),
+        (0, None),
+        (0.5, 0.5),
+        (1.0, 1),
+        (2, 2),
+    ],
+)
+def test_valid_limit_semantics_are_preserved(limit: float | int | None, expected: float | int | None) -> None:
+    config = TaskConfig.from_dict({'model': 'x', 'limit': limit})
+
+    assert config.limit == expected

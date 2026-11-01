@@ -33,9 +33,11 @@ HarveyNER is a dataset with fine-grained locations annotated in tweets, collecte
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='harvey_ner',
         pretty_name='HarveyNER',
         dataset_id='extraordinarylab/harvey-ner',
+        hf_dataset_id='extraordinarylab/harvey-ner',
         tags=[Tags.KNOWLEDGE, Tags.NER],
         description=DESCRIPTION.strip(),
         few_shot_num=5,
@@ -70,7 +72,7 @@ class HarveyNERAdapter(NERAdapter):
                 'building, intersections of roads or rivers.'
             ),
             'RIVER': 'A river or a section of a river.',
-            'ROAD': 'A road or a section of a road.'
+            'ROAD': 'A road or a section of a road.',
         }
 
         # Setup entity mappings based on the defined entity types

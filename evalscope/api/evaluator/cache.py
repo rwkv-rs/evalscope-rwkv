@@ -3,7 +3,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from evalscope.api.agent import AgentTrace
 from evalscope.api.dataset import Dataset
@@ -92,23 +92,37 @@ class CacheManager:
             # No cache file exists, return empty cache and full dataset
             return [], dataset
 
-        cached_task_states = []
-        cached_sample_ids = set()
-        cache_items = jsonl_to_list(cache_file)
+        cached_by_sample_id = {}
+        duplicate_rows = 0
+        cache_items = jsonl_to_list(cache_file, skip_invalid=True)
 
         # Process each cached item
         for cache_item in cache_items:
             # Deserialize the cached model result
-            cached_model_result = ModelResult.model_validate(cache_item)
+            try:
+                cached_model_result = ModelResult.model_validate(cache_item)
+            except ValidationError as e:
+                logger.warning(f'Skipping invalid prediction cache row in {cache_file}: {e}')
+                continue
             # Convert to task state for further processing
-            cached_state = cached_model_result.to_task_state(dataset=dataset)
+            try:
+                cached_state = cached_model_result.to_task_state(dataset=dataset)
+            except ValidationError as e:
+                logger.warning(f'Skipping invalid prediction cache row in {cache_file}: {e}')
+                continue
 
             if cached_state is None:
                 continue
-            cached_task_states.append(cached_state)
-            cached_sample_ids.add(cached_state.sample_id)
+            if cached_state.sample_id in cached_by_sample_id:
+                duplicate_rows += 1
+            cached_by_sample_id[cached_state.sample_id] = cached_state
+
+        cached_task_states = list(cached_by_sample_id.values())
+        if duplicate_rows:
+            logger.warning(f'Dropped {duplicate_rows} duplicate rows from prediction cache: {cache_file}')
 
         # Remove cached samples from the dataset to avoid reprocessing
+        cached_sample_ids = set(cached_by_sample_id)
         filtered_dataset = dataset.filter(lambda sample: sample.id not in cached_sample_ids)
 
         logger.info(
@@ -152,8 +166,9 @@ class CacheManager:
         self._get_writer(cache_file).write(model_result_dict)
         return model_result
 
-    def filter_review_cache(self, subset: str,
-                            task_states: List[TaskState]) -> Tuple[List[SampleScore], List[TaskState]]:
+    def filter_review_cache(
+        self, subset: str, task_states: List[TaskState]
+    ) -> Tuple[List[SampleScore], List[TaskState]]:
         """
         Load cached review results and filter corresponding task states.
 
@@ -172,14 +187,33 @@ class CacheManager:
             # No review cache exists, return empty scores and all task states
             return [], task_states
 
-        cached_sample_scores: List[SampleScore] = []
-        cache_items = jsonl_to_list(cache_file)
+        cached_by_sample_id = {}
+        valid_sample_ids = {state.sample_id for state in task_states}
+        orphan_rows = 0
+        duplicate_rows = 0
+        cache_items = jsonl_to_list(cache_file, skip_invalid=True)
 
         # Process each cached review result
         for cache_item in cache_items:
             # Deserialize the cached review result
-            cached_review_result = ReviewResult.from_cache_item(cache_item)
-            cached_sample_scores.append(cached_review_result.to_sample_score())
+            try:
+                cached_review_result = ReviewResult.from_cache_item(cache_item)
+            except ValidationError as e:
+                logger.warning(f'Skipping invalid review cache row in {cache_file}: {e}')
+                continue
+            sample_score = cached_review_result.to_sample_score()
+            if sample_score.sample_id not in valid_sample_ids:
+                orphan_rows += 1
+                continue
+            if sample_score.sample_id in cached_by_sample_id:
+                duplicate_rows += 1
+            cached_by_sample_id[sample_score.sample_id] = sample_score
+
+        cached_sample_scores: List[SampleScore] = list(cached_by_sample_id.values())
+        if orphan_rows or duplicate_rows:
+            logger.warning(
+                f'Dropped {orphan_rows} orphan and {duplicate_rows} duplicate rows from review cache: {cache_file}'
+            )
 
         # Filter out task states that already have review scores
         cached_sample_ids = {review.sample_id for review in cached_sample_scores}
@@ -208,6 +242,9 @@ class CacheManager:
         """Start a transactional review rerun without touching the previous review file."""
         file_path = self.get_review_cache_path(subset)
         temporary = f'{file_path}.rerun-{uuid.uuid4().hex}'
+        # A tolerated scoring failure must publish an empty cache, not retain old scores.
+        with open(temporary, 'x', encoding='utf-8'):
+            pass
         self._review_reruns[file_path] = temporary
         logger.debug(f'Rescoring reviews into temporary cache: {temporary}')
 
@@ -217,8 +254,6 @@ class CacheManager:
             writer = self._writers.pop(temporary, None)
             if writer is not None:
                 writer.close()
-            if not os.path.exists(temporary):
-                continue
             os.replace(temporary, file_path)
             del self._review_reruns[file_path]
 
@@ -237,7 +272,7 @@ class CacheManager:
         subset: str,
         task_state: TaskState,
         sample_score: SampleScore,
-        save_metadata: bool = True
+        save_metadata: bool = True,
     ) -> 'ReviewResult':
         """
         Save a review result to the cache.
@@ -403,8 +438,8 @@ class ReviewResult(BaseModel):
     index: int
     """Index of the sample that was reviewed."""
 
-    target: Optional[str] = None
-    """Expected/target answer for the sample, if available."""
+    target: Optional[List[str]] = None
+    """Accepted target answers for the sample, if available."""
 
     messages: List[ChatMessage] = Field(default_factory=list)
     """Full chat message history exchanged during evaluation."""
@@ -418,25 +453,36 @@ class ReviewResult(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def _migrate_legacy_input(cls, data: Any) -> Any:
-        """Migrate legacy ``input: str`` / ``trajectory`` into the new shape.
-
-        Older review caches stored only a rendered input string and an unused
-        ``trajectory`` field.  We keep load-compat by synthesizing a user
-        message and silently dropping the legacy trajectory payload.
-        """
+        """Migrate legacy review cache rows into the structured contract."""
         if not isinstance(data, dict):
             return data
+        data = dict(data)
+        target = data.get('target')
+        if isinstance(target, str):
+            target = target.strip()
+            data['target'] = [target] if target else None
+        elif isinstance(target, list):
+            data['target'] = list(dict.fromkeys(value.strip() for value in target if value.strip()))
         legacy_input = data.pop('input', None)
         if legacy_input and not data.get('messages'):
-            data['messages'] = [{
-                'role': 'user',
-                'content': legacy_input,
-            }]
+            data['messages'] = [
+                {
+                    'role': 'user',
+                    'content': legacy_input,
+                }
+            ]
         # Drop obsolete TrajectoryStep list (the new ``agent_trace`` has a
         # different shape; legacy values are not useful and would fail
         # validation).
         data.pop('trajectory', None)
         return data
+
+    @field_validator('target')
+    @classmethod
+    def _validate_target(cls, target: Optional[List[str]]) -> Optional[List[str]]:
+        if target is not None and not target:
+            raise ValueError('ReviewResult.target must not be an empty list.')
+        return target
 
     @classmethod
     def from_cache_item(cls, data: Any) -> 'ReviewResult':
@@ -473,7 +519,7 @@ class ReviewResult(BaseModel):
 
         return cls(
             index=state.sample_id,
-            target=state.target,
+            target=list(state.target_reference.values) or None,
             messages=state.messages,
             agent_trace=state.agent_trace,
             sample_score=sample_score,
@@ -497,7 +543,7 @@ class ReviewResult(BaseModel):
         """
         output = [
             f'Review Result for Sample {self.index}:',
-            f'Target: {self.target}',
+            f'Target: {self.target or []}',
             f'Score: {self.sample_score.model_dump_json(indent=2)}',
         ]
         return '\n'.join(output)

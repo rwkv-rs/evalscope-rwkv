@@ -26,6 +26,7 @@ Answer the following multiple choice question. The last line of your response sh
         name='vstar_bench',
         pretty_name='V*Bench',
         dataset_id='lmms-lab/vstar-bench',
+        hf_dataset_id='lmms-lab/vstar-bench',
         tags=[Tags.MULTIPLE_CHOICE, Tags.MULTI_MODAL, Tags.GROUNDING],
         description="""
 ## Overview
@@ -60,7 +61,6 @@ V*Bench is a benchmark designed for evaluating visual search capabilities within
     )
 )
 class VstarBenchAdapter(VisionLanguageAdapter, MultiChoiceAdapter):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

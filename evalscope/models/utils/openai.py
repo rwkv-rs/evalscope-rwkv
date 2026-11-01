@@ -3,6 +3,7 @@ import json
 import re
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterable, Iterable
 from copy import copy
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
@@ -69,14 +70,44 @@ ReasoningFormat = Literal['think_tag', 'reasoning_field', 'none']
 BASE_64_DATA_REMOVED = '<base64-data-removed>'
 
 
-class OpenAIResponseError(OpenAIError):
+class _ProviderChoice(Choice):
+    """Accept provider finish reasons while retaining the SDK's other choice fields."""
 
+    finish_reason: str
+
+
+class OpenAIResponseError(OpenAIError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         self.message = message
 
     def __str__(self) -> str:
         return f'{self.code}: {self.message}'
+
+
+class EmptyCompletionError(ValueError):
+    """A 200 response whose body carried no choices."""
+
+
+class _NonRetryableEmptyCompletionError(EmptyCompletionError):
+    pass
+
+
+_NON_RETRYABLE_GATEWAY_CODES = {'400', '401', '402', '403', '404', '422'}
+
+
+def raise_if_error_payload(completion: ChatCompletion) -> None:
+    """Reject an error payload that the SDK deserialized as a completion."""
+    if completion.choices is not None:
+        return
+    error = (completion.model_extra or {}).get('error')
+    detail = f': {error}' if error else ' (no error detail in body)'
+    error_type = (
+        _NonRetryableEmptyCompletionError
+        if isinstance(error, dict) and str(error.get('code')) in _NON_RETRYABLE_GATEWAY_CODES
+        else EmptyCompletionError
+    )
+    raise error_type(f'Gateway returned a response with no choices{detail}')
 
 
 def openai_chat_tool_call(tool_call: ToolCall) -> ChatCompletionMessageToolCall:
@@ -122,7 +153,8 @@ def openai_chat_completion_part(
     elif content.type == 'audio':
         # Standard OpenAI / vllm: raw base64 (no data URI prefix)
         # DashScope: requires data URI prefix (data:<mime>;base64,...)
-        audio_data = file_as_data_uri(content.audio)
+        audio_mime = 'audio/wav' if content.format == 'wav' else 'audio/mpeg'
+        audio_data = file_as_data_uri(content.audio, default_mime_type=audio_mime)
         if not _is_dashscope_endpoint(base_url):
             audio_data = data_uri_to_base64(audio_data)
         return ChatCompletionContentPartInputAudioParam(
@@ -167,8 +199,9 @@ def openai_chat_message(
         return ChatCompletionUserMessageParam(
             role=message.role,
             content=(
-                message.content if isinstance(message.content, str) else
-                [openai_chat_completion_part(content, base_url=base_url) for content in message.content]
+                message.content
+                if isinstance(message.content, str)
+                else [openai_chat_completion_part(content, base_url=base_url) for content in message.content]
             ),
         )
     elif message.role == 'assistant':
@@ -342,9 +375,7 @@ def openai_assistant_content(
 
     if message.internal:
         content = f"""{content}\n<internal>{
-            base64.b64encode(json.dumps(message.internal).encode("utf-8")).decode(
-                "utf-8"
-            )
+            base64.b64encode(json.dumps(message.internal).encode('utf-8')).decode('utf-8')
         }</internal>\n"""
     return content
 
@@ -389,7 +420,7 @@ def openai_completion_usage(usage: ModelUsage) -> CompletionUsage:
 
 
 def openai_finish_reason(
-    stop_reason: StopReason
+    stop_reason: StopReason,
 ) -> Literal['stop', 'length', 'tool_calls', 'content_filter', 'function_call']:
     if stop_reason in ('stop', 'tool_calls', 'content_filter'):
         return stop_reason
@@ -412,7 +443,9 @@ def openai_chat_tools(tools: List[ToolInfo]) -> List[ChatCompletionToolParam]:
     return [openai_chat_tool_param(tool) for tool in tools]
 
 
-def openai_chat_tool_choice(tool_choice: ToolChoice, ) -> ChatCompletionToolChoiceOptionParam:
+def openai_chat_tool_choice(
+    tool_choice: ToolChoice,
+) -> ChatCompletionToolChoiceOptionParam:
     if isinstance(tool_choice, ToolFunction):
         return ChatCompletionNamedToolChoiceParam(type='function', function=dict(name=tool_choice.name))
     # openai supports 'any' via the 'required' keyword
@@ -582,10 +615,12 @@ def content_from_openai(
     elif content['type'] == 'image_url':
         return [ContentImage(image=content['image_url']['url'], detail=content['image_url'].get('detail', 'auto'))]
     elif content['type'] == 'input_audio':
-        return [ContentAudio(
-            audio=content['input_audio']['data'],
-            format=content['input_audio']['format'],
-        )]
+        return [
+            ContentAudio(
+                audio=content['input_audio']['data'],
+                format=content['input_audio']['format'],
+            )
+        ]
     elif content['type'] == 'video_url':  # type: ignore[comparison-overlap]
         video_url = content['video_url']
         if isinstance(video_url, str):
@@ -640,24 +675,34 @@ def model_output_from_openai(
     completion: ChatCompletion,
     choices: list[ChatCompletionChoice],
 ) -> ModelOutput:
+    finish_reasons: Dict[str, str] = {
+        str(choice.index): choice.finish_reason
+        for choice in completion.choices
+        if choice.finish_reason is not None and as_stop_reason(choice.finish_reason) == 'unknown'
+    }
     return ModelOutput(
         id=completion.id,
         model=completion.model,
         choices=choices,
+        metadata={'finish_reasons': finish_reasons} if finish_reasons else None,
         usage=(
             ModelUsage(
                 input_tokens=completion.usage.prompt_tokens,
                 output_tokens=completion.usage.completion_tokens,
                 input_tokens_cache_read=(
-                    completion.usage.prompt_tokens_details.cached_tokens if completion.usage.prompt_tokens_details
-                    is not None else None  # openai only have cache read stats/pricing.
+                    completion.usage.prompt_tokens_details.cached_tokens
+                    if completion.usage.prompt_tokens_details is not None
+                    else None  # openai only have cache read stats/pricing.
                 ),
                 reasoning_tokens=(
                     completion.usage.completion_tokens_details.reasoning_tokens
-                    if completion.usage.completion_tokens_details is not None else None
+                    if completion.usage.completion_tokens_details is not None
+                    else None
                 ),
                 total_tokens=completion.usage.total_tokens,
-            ) if completion.usage else None
+            )
+            if completion.usage
+            else None
         ),
     )
 
@@ -688,9 +733,11 @@ def chat_choices_from_openai(response: ChatCompletion, tools: List[ToolInfo]) ->
             stop_reason=as_stop_reason(choice.finish_reason),
             logprobs=(
                 Logprobs(**choice.logprobs.model_dump())
-                if choice.logprobs and choice.logprobs.content is not None else None
+                if choice.logprobs and choice.logprobs.content is not None
+                else None
             ),
-        ) for choice in choices
+        )
+        for choice in choices
     ]
 
 
@@ -717,12 +764,15 @@ def openai_handle_bad_request(model_name: str, e: APIStatusError) -> Union[Model
     # uses code='invalid_parameter_error' with "Range of input length ...").
     if stop_reason is None:
         msg = (content or '').lower()
-        if any(p in msg for p in (
-            'input length',
-            'maximum context length',
-            'context window',
-            'too many tokens',
-        )):
+        if any(
+            p in msg
+            for p in (
+                'input length',
+                'maximum context length',
+                'context window',
+                'too many tokens',
+            )
+        ):
             stop_reason = 'model_length'
 
     if stop_reason:
@@ -752,7 +802,9 @@ def openai_media_filter(key: Optional[JsonValue], value: JsonValue) -> JsonValue
     return value
 
 
-def _parse_content_with_internal(content: str, ) -> Tuple[str, Optional[JsonValue]]:
+def _parse_content_with_internal(
+    content: str,
+) -> Tuple[str, Optional[JsonValue]]:
     """
     Extracts and removes a smuggled <internal>...</internal> tag from the content string, if present.
 
@@ -777,15 +829,64 @@ def _parse_content_with_internal(content: str, ) -> Tuple[str, Optional[JsonValu
     internal_pattern = r'<internal>(.*?)</internal>'
     internal_match = re.search(r'<internal>(.*?)</internal>', content, re.DOTALL)
 
-    return ((
-        re.sub(internal_pattern, '', content, flags=re.DOTALL).strip(),
-        json.loads(base64.b64decode(internal_match.group(1)).decode('utf-8')),
-    ) if internal_match else (content, None))
+    return (
+        (
+            re.sub(internal_pattern, '', content, flags=re.DOTALL).strip(),
+            json.loads(base64.b64decode(internal_match.group(1)).decode('utf-8')),
+        )
+        if internal_match
+        else (content, None)
+    )
+
+
+def _stream_finish_reasons(
+    chunks: List[ChatCompletionChunk], finish_reason_chunks: Optional[List[ChatCompletionChunk]]
+) -> Dict[int, str]:
+    """Require an explicit terminal state for every choice observed in a stream."""
+    indices = {choice.index for chunk in chunks for choice in chunk.choices}
+    finish_reasons: Dict[int, str] = {}
+    for chunk in chunks if finish_reason_chunks is None else finish_reason_chunks:
+        for choice in chunk.choices:
+            indices.add(choice.index)
+            if choice.finish_reason:
+                finish_reasons[choice.index] = choice.finish_reason
+
+    if not indices:
+        raise RuntimeError('No valid chat completion chunks received from stream')
+    unfinished = indices - finish_reasons.keys()
+    if unfinished:
+        raise RuntimeError(f'Stream ended without a finish reason for choices {sorted(unfinished)}')
+    return finish_reasons
+
+
+def _stream_tool_call_key(calls: Dict[Any, Dict[str, Any]], tool_call: Any) -> Any:
+    """Return the key of the call a streamed tool-call delta belongs to.
+
+    Chunks normally carry the ``index`` of their call. Some OpenAI-compatible endpoints (for
+    example Gemini's) omit it, which would merge every parallel call into one. Without an
+    index, a delta continues the latest call, unless it starts a new one: it carries a different
+    id, or it names a function when the latest call already has a name.
+    """
+    index = getattr(tool_call, 'index', None)
+    if index is not None:
+        return index
+    if not calls:
+        return 0
+    last_key = next(reversed(calls))
+    last = calls[last_key]
+    call_id = getattr(tool_call, 'id', None)
+    name = getattr(getattr(tool_call, 'function', None), 'name', None)
+    if call_id:
+        starts_new_call = last['id'] is not None and call_id != last['id']
+    else:
+        starts_new_call = bool(name) and bool(last['function']['name'])
+    return last_key + 1 if starts_new_call else last_key
 
 
 def collect_stream_response(
-    response_stream: List[ChatCompletionChunk],
+    response_stream: Iterable[ChatCompletionChunk],
     request_start: Optional[float] = None,
+    finish_reason_chunks: Optional[List[ChatCompletionChunk]] = None,
 ) -> Tuple[ChatCompletion, Optional[float]]:
     """Consume a streaming chat completion and aggregate chunks into a single ChatCompletion.
 
@@ -796,6 +897,9 @@ def collect_stream_response(
             provided, TTFT is measured from that point so that connection-establishment
             and header-receive latency are included.  When ``None``, TTFT is measured
             from the moment this function is entered (legacy behaviour).
+        finish_reason_chunks: Original terminal chunks recorded by a provider adapter
+            before normalization. When supplied, use these instead of normalized
+            finish reasons, which may be synthesized or lost by a provider wrapper.
 
     Returns:
         A tuple of:
@@ -804,6 +908,9 @@ def collect_stream_response(
           from function entry when ``request_start`` is ``None``) until the first chunk
           carrying non-empty content or tool-call data arrives.
           ``None`` if no content chunk was observed.
+
+    Raises:
+        RuntimeError: If the stream is empty or any choice lacks a finish reason.
     """
     collected_chunks: List[ChatCompletionChunk] = []
     collected_messages = defaultdict(list)
@@ -818,6 +925,13 @@ def collect_stream_response(
         if getattr(chunk, 'usage', None) is not None:
             usage = chunk.usage
         if not getattr(chunk, 'choices', None):
+            # vLLM/SGLang report a failure after HTTP 200 as an SSE event with
+            # object == 'error' (no choices). The OpenAI SDK only raises on the
+            # {"error": ...} form; the {"object": "error", ...} form reaches
+            # here and must not be silently skipped, otherwise a partial reply
+            # is counted as success. See modelscope/evalscope#1906.
+            if getattr(chunk, 'object', None) == 'error':
+                raise EmptyCompletionError(f'Stream returned an error event with no choices: {chunk.model_extra or {}}')
             continue
         collected_chunks.append(chunk)
         for choice in chunk.choices:
@@ -826,9 +940,11 @@ def collect_stream_response(
                 reasoning_content = getattr(choice.delta, 'reasoning', None)
 
             # Detect first meaningful content chunk for TTFT
-            has_content = ((choice.delta.content is not None and choice.delta.content != '')
-                           or (reasoning_content is not None and reasoning_content != '')
-                           or (hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls))
+            has_content = (
+                (choice.delta.content is not None and choice.delta.content != '')
+                or (reasoning_content is not None and reasoning_content != '')
+                or (hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls)
+            )
             if ttft is None and has_content:
                 ttft = time.monotonic() - t_start
 
@@ -843,37 +959,33 @@ def collect_stream_response(
             # Handle tool calls
             if hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls:
                 for tool_call in choice.delta.tool_calls:
-                    tool_id = tool_call.index
+                    tool_id = _stream_tool_call_key(collected_tool_calls[choice.index], tool_call)
 
                     # Initialize tool call if not present
                     if tool_id not in collected_tool_calls[choice.index]:
                         collected_tool_calls[choice.index][tool_id] = {
                             'id': tool_call.id if hasattr(tool_call, 'id') and tool_call.id else None,
                             'type': tool_call.type if hasattr(tool_call, 'type') and tool_call.type else None,
-                            'function': {
-                                'name': '',
-                                'arguments': ''
-                            }
+                            'function': {'name': '', 'arguments': ''},
                         }
 
                     # Update tool call with new chunks
                     if hasattr(tool_call, 'function'):
                         if hasattr(tool_call.function, 'name') and tool_call.function.name:
-                            collected_tool_calls[choice.index][tool_id]['function']['name'] = tool_call.function.name
+                            collected_tool_calls[choice.index][tool_id]['function']['name'] += tool_call.function.name
 
                         if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
-                            collected_tool_calls[choice.index
-                                                 ][tool_id]['function']['arguments'] += tool_call.function.arguments
+                            collected_tool_calls[choice.index][tool_id]['function']['arguments'] += (
+                                tool_call.function.arguments
+                            )
 
                     # Update ID if it was received later
                     if hasattr(tool_call, 'id') and tool_call.id:
                         collected_tool_calls[choice.index][tool_id]['id'] = tool_call.id
 
-    # Get all unique choice indices from all collections
-    all_indices = set(collected_messages.keys()) | set(collected_reasoning.keys()) | set(collected_tool_calls.keys())
-
+    finish_reasons = _stream_finish_reasons(collected_chunks, finish_reason_chunks)
     choices = []
-    for index in all_indices:
+    for index, finish_reason in finish_reasons.items():
         full_reply_content = ''.join(collected_messages.get(index, []))
         reasoning = ''.join(collected_reasoning.get(index, []))
 
@@ -884,13 +996,6 @@ def collect_stream_response(
             # Filter out any tool calls with None id (incomplete tool calls)
             tool_calls_list = [tc for tc in tool_calls_list if tc['id'] is not None]
 
-        # use the finish_reason from the last chunk that generated this choice
-        finish_reason = None
-        for chunk in reversed(collected_chunks):
-            if chunk.choices and chunk.choices[0].index == index:
-                finish_reason = chunk.choices[0].finish_reason
-                break
-
         message_kwargs = {'role': 'assistant', 'content': full_reply_content}
 
         if reasoning:
@@ -899,13 +1004,10 @@ def collect_stream_response(
         if tool_calls_list:
             message_kwargs['tool_calls'] = tool_calls_list
 
-        choice = Choice(
-            finish_reason=finish_reason or 'stop', index=index, message=ChatCompletionMessage(**message_kwargs)
+        choice = _ProviderChoice(
+            finish_reason=finish_reason, index=index, message=ChatCompletionMessage(**message_kwargs)
         )
         choices.append(choice)
-
-    if not collected_chunks:
-        raise RuntimeError('No valid chat completion chunks received from stream')
 
     # build the final completion object
     return ChatCompletion(
@@ -914,13 +1016,14 @@ def collect_stream_response(
         created=collected_chunks[0].created,
         model=collected_chunks[0].model,
         object='chat.completion',
-        usage=usage if usage is not None else getattr(collected_chunks[-1], 'usage', None)
+        usage=usage if usage is not None else getattr(collected_chunks[-1], 'usage', None),
     ), ttft
 
 
 async def async_collect_stream_response(
-    response_stream,
+    response_stream: AsyncIterable[ChatCompletionChunk],
     request_start: Optional[float] = None,
+    finish_reason_chunks: Optional[List[ChatCompletionChunk]] = None,
 ) -> Tuple[ChatCompletion, Optional[float]]:
     """Async version of :func:`collect_stream_response`.
 
@@ -931,10 +1034,15 @@ async def async_collect_stream_response(
     Args:
         response_stream: Async iterable of ``ChatCompletionChunk`` objects.
         request_start: ``time.monotonic()`` timestamp for TTFT measurement.
+        finish_reason_chunks: Original terminal chunks recorded before provider
+            normalization, as in :func:`collect_stream_response`.
 
     Returns:
         A tuple of the assembled ``ChatCompletion`` and TTFT in seconds
         (or ``None`` if no content chunk was observed).
+
+    Raises:
+        RuntimeError: If the stream is empty or any choice lacks a finish reason.
     """
     collected_chunks: List[ChatCompletionChunk] = []
     collected_messages = defaultdict(list)
@@ -949,6 +1057,13 @@ async def async_collect_stream_response(
         if getattr(chunk, 'usage', None) is not None:
             usage = chunk.usage
         if not getattr(chunk, 'choices', None):
+            # vLLM/SGLang report a failure after HTTP 200 as an SSE event with
+            # object == 'error' (no choices). The OpenAI SDK only raises on the
+            # {"error": ...} form; the {"object": "error", ...} form reaches
+            # here and must not be silently skipped, otherwise a partial reply
+            # is counted as success. See modelscope/evalscope#1906.
+            if getattr(chunk, 'object', None) == 'error':
+                raise EmptyCompletionError(f'Stream returned an error event with no choices: {chunk.model_extra or {}}')
             continue
         collected_chunks.append(chunk)
         for choice in chunk.choices:
@@ -957,9 +1072,11 @@ async def async_collect_stream_response(
                 reasoning_content = getattr(choice.delta, 'reasoning', None)
 
             # Detect first meaningful content chunk for TTFT
-            has_content = ((choice.delta.content is not None and choice.delta.content != '')
-                           or (reasoning_content is not None and reasoning_content != '')
-                           or (hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls))
+            has_content = (
+                (choice.delta.content is not None and choice.delta.content != '')
+                or (reasoning_content is not None and reasoning_content != '')
+                or (hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls)
+            )
             if ttft is None and has_content:
                 ttft = time.monotonic() - t_start
 
@@ -974,37 +1091,33 @@ async def async_collect_stream_response(
             # Handle tool calls
             if hasattr(choice.delta, 'tool_calls') and choice.delta.tool_calls:
                 for tool_call in choice.delta.tool_calls:
-                    tool_id = tool_call.index
+                    tool_id = _stream_tool_call_key(collected_tool_calls[choice.index], tool_call)
 
                     # Initialize tool call if not present
                     if tool_id not in collected_tool_calls[choice.index]:
                         collected_tool_calls[choice.index][tool_id] = {
                             'id': tool_call.id if hasattr(tool_call, 'id') and tool_call.id else None,
                             'type': tool_call.type if hasattr(tool_call, 'type') and tool_call.type else None,
-                            'function': {
-                                'name': '',
-                                'arguments': ''
-                            }
+                            'function': {'name': '', 'arguments': ''},
                         }
 
                     # Update tool call with new chunks
                     if hasattr(tool_call, 'function'):
                         if hasattr(tool_call.function, 'name') and tool_call.function.name:
-                            collected_tool_calls[choice.index][tool_id]['function']['name'] = tool_call.function.name
+                            collected_tool_calls[choice.index][tool_id]['function']['name'] += tool_call.function.name
 
                         if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
-                            collected_tool_calls[choice.index
-                                                 ][tool_id]['function']['arguments'] += tool_call.function.arguments
+                            collected_tool_calls[choice.index][tool_id]['function']['arguments'] += (
+                                tool_call.function.arguments
+                            )
 
                     # Update ID if it was received later
                     if hasattr(tool_call, 'id') and tool_call.id:
                         collected_tool_calls[choice.index][tool_id]['id'] = tool_call.id
 
-    # Get all unique choice indices from all collections
-    all_indices = set(collected_messages.keys()) | set(collected_reasoning.keys()) | set(collected_tool_calls.keys())
-
+    finish_reasons = _stream_finish_reasons(collected_chunks, finish_reason_chunks)
     choices = []
-    for index in all_indices:
+    for index, finish_reason in finish_reasons.items():
         full_reply_content = ''.join(collected_messages.get(index, []))
         reasoning = ''.join(collected_reasoning.get(index, []))
 
@@ -1015,13 +1128,6 @@ async def async_collect_stream_response(
             # Filter out any tool calls with None id (incomplete tool calls)
             tool_calls_list = [tc for tc in tool_calls_list if tc['id'] is not None]
 
-        # use the finish_reason from the last chunk that generated this choice
-        finish_reason = None
-        for chunk in reversed(collected_chunks):
-            if chunk.choices and chunk.choices[0].index == index:
-                finish_reason = chunk.choices[0].finish_reason
-                break
-
         message_kwargs = {'role': 'assistant', 'content': full_reply_content}
 
         if reasoning:
@@ -1030,13 +1136,10 @@ async def async_collect_stream_response(
         if tool_calls_list:
             message_kwargs['tool_calls'] = tool_calls_list
 
-        choice = Choice(
-            finish_reason=finish_reason or 'stop', index=index, message=ChatCompletionMessage(**message_kwargs)
+        choice = _ProviderChoice(
+            finish_reason=finish_reason, index=index, message=ChatCompletionMessage(**message_kwargs)
         )
         choices.append(choice)
-
-    if not collected_chunks:
-        raise RuntimeError('No valid chat completion chunks received from stream')
 
     # build the final completion object
     return ChatCompletion(
@@ -1045,5 +1148,5 @@ async def async_collect_stream_response(
         created=collected_chunks[0].created,
         model=collected_chunks[0].model,
         object='chat.completion',
-        usage=usage if usage is not None else getattr(collected_chunks[-1], 'usage', None)
+        usage=usage if usage is not None else getattr(collected_chunks[-1], 'usage', None),
     ), ttft

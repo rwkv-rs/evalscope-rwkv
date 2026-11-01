@@ -3,10 +3,14 @@ import math
 import os
 import shutil
 import uuid
+from copy import deepcopy
 from datetime import datetime
+from importlib.metadata import version
 from numbers import Real
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
+
+from packaging.version import Version
 
 from evalscope.api.agent import AgentTrace, AgentTraceEvent, EventType
 from evalscope.api.benchmark import AgentAdapter, BenchmarkMeta
@@ -29,7 +33,7 @@ COMMON_EXTRA_PARAMS = {
         'type': 'str',
         'description': 'Environment type for running the benchmark.',
         'value': 'docker',
-        'choices': ['docker', 'daytona', 'e2b', 'modal']
+        'choices': ['docker', 'daytona', 'e2b', 'modal'],
     },
     'agent_name': {
         'type': 'str',
@@ -37,7 +41,14 @@ COMMON_EXTRA_PARAMS = {
         'other agents (claude-code, codex, etc.) run as standalone CLI tools with their own API keys.',
         'value': 'terminus-2',
         'choices': [
-            'oracle', 'terminus-2', 'claude-code', 'codex', 'qwen-coder', 'openhands', 'opencode', 'mini-swe-agent'
+            'oracle',
+            'terminus-2',
+            'claude-code',
+            'codex',
+            'qwen-coder',
+            'openhands',
+            'opencode',
+            'mini-swe-agent',
         ],
     },
     'timeout_multiplier': {
@@ -79,6 +90,17 @@ COMMON_EXTRA_PARAMS = {
     },
 }
 
+V4_EXTRA_PARAMS = deepcopy(COMMON_EXTRA_PARAMS)
+V4_EXTRA_PARAMS['max_turns'].update(
+    description='Maximum agent turns. None uses the Harbor agent default.',
+    value=None,
+)
+V4_EXTRA_PARAMS['task_names'] = {
+    'type': 'list',
+    'description': 'Optional Harbor task names or glob patterns, e.g. terminal-bench/ctr-optimization.',
+    'value': None,
+}
+
 
 def _validate_environment_requirements(environment_type: str):
     environment_type = (environment_type or '').strip().lower()
@@ -87,15 +109,16 @@ def _validate_environment_requirements(environment_type: str):
 
     if shutil.which('docker') is None:
         raise RuntimeError(
-            'Terminal-Bench with environment_type=\'docker\' requires the Docker CLI to be installed in the '
+            "Terminal-Bench with environment_type='docker' requires the Docker CLI to be installed in the "
             'environment running EvalScope. Mounting /var/run/docker.sock only exposes the Docker daemon socket; '
             'it does not provide the docker command. Install the Docker CLI in the container or switch '
-            'environment_type to \'daytona\', \'e2b\', or \'modal\'.'
+            "environment_type to 'daytona', 'e2b', or 'modal'."
         )
 
 
-def _phase_timeout_options(timeout_sec: Optional[float], timeout_multiplier: Optional[float],
-                           phase: str) -> Tuple[Optional[float], Optional[float]]:
+def _phase_timeout_options(
+    timeout_sec: Optional[float], timeout_multiplier: Optional[float], phase: str
+) -> Tuple[Optional[float], Optional[float]]:
     if timeout_sec is not None and timeout_multiplier is not None:
         raise ValueError(f'{phase}_timeout_sec cannot be combined with {phase}_timeout_multiplier.')
     if timeout_sec is not None:
@@ -123,8 +146,9 @@ class _TerminalBenchBase(AgentAdapter):
             self.extra_params.get('agent_timeout_sec'), self.extra_params.get('agent_timeout_multiplier'), 'agent'
         )
         self.verifier_timeout_sec, self.verifier_timeout_multiplier = _phase_timeout_options(
-            self.extra_params.get('verifier_timeout_sec'), self.extra_params.get('verifier_timeout_multiplier'),
-            'verifier'
+            self.extra_params.get('verifier_timeout_sec'),
+            self.extra_params.get('verifier_timeout_multiplier'),
+            'verifier',
         )
         self.max_turns = self.extra_params.get('max_turns', 200)
         self.environment_kwargs = self.extra_params.get('environment_kwargs', {})
@@ -136,6 +160,8 @@ class _TerminalBenchBase(AgentAdapter):
 
         config = DatasetConfig(
             name=self.hub_dataset_name,
+            ref=self.benchmark_meta.dataset_revision,
+            task_names=self.extra_params.get('task_names'),
             overwrite=self.force_redownload,
             download_dir=Path(os.path.join(DEFAULT_EVALSCOPE_CACHE_DIR, self.name)),
         )
@@ -173,14 +199,16 @@ class _TerminalBenchBase(AgentAdapter):
         env_kwargs = {k: v for k, v in self.environment_kwargs.items() if k != 'type'}
         environment_config = EnvironmentConfig(type=self.environment_type, **env_kwargs)
 
-        agent_kwargs = {'max_turns': self.max_turns}
+        agent_kwargs = {} if self.agent_name == 'codex' else {'max_turns': self.max_turns}
         if self.agent_name == 'terminus-2':
-            agent_kwargs.update({
-                'parser_name': 'json',
-                'enable_summarize': True,
-                'proactive_summarization_threshold': 8000,
-                'collect_rollout_details': False,
-            })
+            agent_kwargs.update(
+                {
+                    'parser_name': 'json',
+                    'enable_summarize': True,
+                    'proactive_summarization_threshold': 8000,
+                    'collect_rollout_details': False,
+                }
+            )
 
         agent_config = AgentConfig(
             name=self.agent_name,
@@ -202,7 +230,6 @@ class _TerminalBenchBase(AgentAdapter):
         )
 
         try:
-
             harbor_llm = HarborLLM(model=model) if self.agent_name == 'terminus-2' else None
 
             async def _run_trial():
@@ -234,7 +261,7 @@ class _TerminalBenchBase(AgentAdapter):
     def _load_harbor_trace(
         self,
         result_dict: dict,
-        perf_metrics: Optional[List[Any]] = None
+        perf_metrics: Optional[List[Any]] = None,
     ) -> Tuple[Optional[AgentTrace], Optional[List[ChatMessage]]]:
         trial_uri = result_dict.get('trial_uri') or ''
         if trial_uri.startswith('file://'):
@@ -279,8 +306,7 @@ class _TerminalBenchBase(AgentAdapter):
                 for tc in step.get('tool_calls', []):
                     tool_calls.append(
                         ToolCall(
-                            id=tc.get('tool_call_id',
-                                      uuid.uuid4().hex[:8]),
+                            id=tc.get('tool_call_id', uuid.uuid4().hex[:8]),
                             function=ToolFunction(
                                 name=tc.get('function_name', 'bash_command'),
                                 arguments=tc.get('arguments', {}),
@@ -323,11 +349,7 @@ class _TerminalBenchBase(AgentAdapter):
                             step=step_id,
                             type=EventType.TOOL_CALL,
                             timestamp=ts_epoch or 0,
-                            payload={
-                                'id': tc.id,
-                                'name': tc.function.name,
-                                'arguments': tc.function.arguments
-                            },
+                            payload={'id': tc.id, 'name': tc.function.name, 'arguments': tc.function.arguments},
                         )
                     )
 
@@ -496,7 +518,6 @@ Terminal-Bench v2 is a command-line benchmark suite that evaluates AI agents on 
     )
 )
 class TerminalBenchV2Adapter(_TerminalBenchBase):
-
     hub_dataset_name = 'terminal-bench/terminal-bench-2'
 
 
@@ -542,5 +563,65 @@ Terminal-Bench v2.1 is an improved iteration of Terminal-Bench 2.0, with 26 task
     )
 )
 class TerminalBenchV2_1Adapter(_TerminalBenchBase):
-
     hub_dataset_name = 'terminal-bench/terminal-bench-2-1'
+
+
+@register_benchmark(
+    BenchmarkMeta(
+        name='terminal_bench_v4',
+        pretty_name='Terminal-Bench-4.0',
+        tags=[Tags.CODING],
+        description="""
+## Overview
+
+Terminal-Bench 4.0 evaluates agents on 66 challenging terminal tasks using the official Harbor harness. It calibrates task resources, fixes task instructions and verifiers, and removes tasks that no longer provide useful differentiation.
+
+## Task Description
+
+- **Task Type**: Command-Line Agent Evaluation
+- **Input**: Task instructions and an isolated runtime environment
+- **Output**: Agent-produced artifacts and task completion, checked by the official verifier
+- **Domain**: Software engineering, machine learning, security, science, and operations
+
+## Key Features
+
+- Fixed upstream dataset revision **4.0.0**, with content-addressed task versions
+- 66 tasks, including 11 multi-container tasks and 3 tasks requiring an H100 GPU
+- Separate verifier environments for all tasks, including a task with a GPU verifier
+- Official agent timeout of 8 hours per task; task-specific CPU, memory, and verifier budgets
+- Configurable Harbor agents, explicit task-name filtering, and repeated evaluation
+
+## Evaluation Notes
+
+- Requires **Python>=3.12**, **Harbor>=0.14.0,<1.0.0**, and `pip install 'evalscope[terminal_bench]'`
+- Scores are the mean of valid official verifier rewards (0/1); failed trials and invalid rewards are not valid scores
+- Defaults to Docker and terminus-2; terminus-2 uses the configured EvalScope model, while external CLI agents use their own API credentials
+- Full evaluation requires a Docker host with H100 GPU access and multi-container support; Modal is an alternative with `harbor[modal]` and account credentials
+- Task resources and timeouts are inherited from upstream; max_turns defaults to None, using the Harbor agent default
+- Use task_names for an explicit debugging subset and repeats for repeated trials; subset results and results from older benchmark versions are not directly comparable to a full 4.0 evaluation
+- [Usage Example](https://evalscope.readthedocs.io/en/latest/third_party/terminal_bench.html)
+""",
+        dataset_id='https://hub.harborframework.com/datasets/terminal-bench/terminal-bench/4',
+        dataset_revision='4.0.0',
+        metric_list=['acc'],
+        eval_split='test',
+        prompt_template='{question}',
+        extra_params=V4_EXTRA_PARAMS,
+        evaluation_version='v1.0',
+    )
+)
+class TerminalBenchV4Adapter(_TerminalBenchBase):
+    """Run the fixed Terminal-Bench 4.0 dataset through Harbor."""
+
+    hub_dataset_name = 'terminal-bench/terminal-bench'
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize the adapter and reject unsupported Harbor versions."""
+        super().__init__(**kwargs)
+        harbor_version = version('harbor')
+        installed_version = Version(harbor_version)
+        if not Version('0.14.0') <= installed_version < Version('1.0.0'):
+            raise ImportError(
+                f'Terminal-Bench 4.0 requires Harbor>=0.14.0,<1.0.0; found {harbor_version}. '
+                "Please run `pip install --upgrade 'evalscope[terminal_bench]'`."
+            )

@@ -16,6 +16,7 @@ logger = get_logger()
         name='wenet_speech',
         pretty_name='WenetSpeech',
         dataset_id='lmms-lab/WenetSpeech',
+        hf_dataset_id='lmms-lab/WenetSpeech',
         tags=[Tags.AUDIO, Tags.SPEECH_RECOGNITION],
         description="""
 ## Overview
@@ -44,6 +45,7 @@ WenetSpeech is a large-scale Mandarin Chinese speech corpus with over 10,000 hou
 - Primary metric: **MER** (Mixed Error Rate)
 - MER tokenizes Chinese characters individually and English words as whole tokens
 - Prompt: "Please listen to the audio and transcribe what you hear"
+- Requires an OpenAI-compatible server that supports the `input_audio` content part for audio input.
 """,
         subset_list=['dev', 'test_meeting'],
         eval_split='test_meeting',
@@ -54,7 +56,6 @@ WenetSpeech is a large-scale Mandarin Chinese speech corpus with over 10,000 hou
     )
 )
 class WenetSpeechAdapter(AudioLanguageAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.split_as_subset = True
@@ -66,7 +67,9 @@ class WenetSpeechAdapter(AudioLanguageAdapter):
         content_list.append(ContentAudio(audio=audio_base64, format='wav'))
 
         return Sample(
-            input=[ChatMessageUser(content=content_list)], target=record['text'], metadata={
+            input=[ChatMessageUser(content=content_list)],
+            target=record['text'],
+            metadata={
                 'text': record['text'],
-            }
+            },
         )

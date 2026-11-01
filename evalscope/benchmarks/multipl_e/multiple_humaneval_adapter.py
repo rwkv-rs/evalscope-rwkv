@@ -51,6 +51,7 @@ MultiPL-E HumanEval is a multilingual code generation benchmark derived from Ope
 - See [sandbox documentation](https://evalscope.readthedocs.io/en/latest/user_guides/sandbox.html) for setup
 """,  # noqa: E501
         dataset_id='evalscope/MultiPL-E',
+        hf_dataset_id='nuprl/MultiPL-E',
         subset_list=[
             'humaneval-cpp',
             'humaneval-ts',
@@ -82,7 +83,7 @@ MultiPL-E HumanEval is a multilingual code generation benchmark derived from Ope
             'tools_config': {
                 'shell_executor': {},
                 'python_executor': {},
-                'multi_code_executor': {}  # Multi-language code executor
+                'multi_code_executor': {},  # Multi-language code executor
             },
             'memory_limit': '2g',
             'cpu_limit': '2.0',
@@ -111,7 +112,7 @@ class MultiPLEHumanEvalAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
                 'task_id': record.get('name', record.get('task_id')),
                 'language': record.get('language'),
                 'doctests': record.get('doctests', ''),
-            }
+            },
         )
 
     def format_prompt_template(self, sample: Sample) -> str:

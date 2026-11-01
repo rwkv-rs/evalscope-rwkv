@@ -21,15 +21,19 @@ Problem:
 Please reason step by step, and put your final answer within \\boxed{{}}.
 """.lstrip()
 
-FEWSHOT_TEMPLATE = """
+FEWSHOT_TEMPLATE = (
+    """
 Here are some examples of how to solve similar problems:
 
 {fewshot}
-""".lstrip() + PROMPT_TEMPLATE
+""".lstrip()
+    + PROMPT_TEMPLATE
+)
 
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='competition_math',
         pretty_name='Competition-MATH',
         tags=[Tags.MATH, Tags.REASONING],
@@ -63,11 +67,7 @@ Competition-MATH is a comprehensive benchmark of 12,500 challenging competition 
 """,
         dataset_id='evalscope/competition_math',
         subset_list=['Level 1', 'Level 2', 'Level 3', 'Level 4', 'Level 5'],
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         few_shot_num=4,
         train_split='train',
         eval_split='test',
@@ -76,7 +76,6 @@ Competition-MATH is a comprehensive benchmark of 12,500 challenging competition 
     )
 )
 class CompetitionMathAdapter(DefaultDataAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

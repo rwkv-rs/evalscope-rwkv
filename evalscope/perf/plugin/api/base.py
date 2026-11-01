@@ -8,22 +8,23 @@ from evalscope.perf.utils.benchmark_util import BenchmarkData
 from evalscope.perf.utils.body_meta import BODY_META_HEADERS, BODY_META_PREFIX, BODY_META_REQUEST_ID
 
 # Hop-by-hop headers that must not be forwarded from trace data.
-_HOP_BY_HOP_HEADERS = frozenset({
-    'host',
-    'connection',
-    'content-length',
-    'transfer-encoding',
-    'keep-alive',
-    'proxy-authenticate',
-    'proxy-authorization',
-    'te',
-    'trailers',
-    'upgrade',
-})
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        'host',
+        'connection',
+        'content-length',
+        'transfer-encoding',
+        'keep-alive',
+        'proxy-authenticate',
+        'proxy-authorization',
+        'te',
+        'trailers',
+        'upgrade',
+    }
+)
 
 
 class ApiPluginBase:
-
     def __init__(self, param: Arguments) -> None:
         self.param = param
         self.model_path = param.tokenizer_path
@@ -67,6 +68,10 @@ class ApiPluginBase:
             Dict: The api request body.
         """
         raise NotImplementedError
+
+    def set_request_max_tokens(self, request: Dict, max_tokens: int) -> None:
+        """Set the per-request output token cap where this protocol expects it."""
+        request['max_tokens'] = max_tokens
 
     @abstractmethod
     def parse_responses(self, responses: List[Dict], request: str = None, **kwargs: Any) -> Tuple[int, int]:

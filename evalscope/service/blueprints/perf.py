@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 from flask import Blueprint, current_app, jsonify, request, send_file
@@ -6,22 +7,41 @@ from tabulate import tabulate
 
 from evalscope.metrics.semantics import resolve_perf_semantics
 from evalscope.perf.arguments import Arguments as PerfArguments
+from evalscope.perf.plugin.api.base import ApiPluginBase
+from evalscope.perf.plugin.registry import ApiRegistry, DatasetRegistry
+from evalscope.perf.sla.sla_run import SLAResult, format_sla_tables
 from evalscope.perf.utils.benchmark_util import Metrics
 from evalscope.perf.utils.rich_display import EmbeddingResultAnalyzer, LLMResultAnalyzer
+from evalscope.service.api_models import (
+    DeletePerfRunResponse,
+    EvalInvokeResponse,
+    ListPerfRunsResponse,
+    LogResponse,
+    PerfDetailResponse,
+    PerfRequestsResponse,
+    PerfRunsListResponse,
+    ProgressResponse,
+    TaskStatusResponse,
+)
 from evalscope.utils.logger import get_logger
+from evalscope.utils.uri_utils import sanitize_endpoint, validate_http_endpoint
 
 from .. import perf_archive
 from ..perf_archive import PerfArchiveError
+from ..responses import json_response
 from ..utils import (
     OUTPUT_DIR,
     TaskStoppedError,
     active_task_ids,
+    build_task_info,
     create_log_file,
+    finish_task,
     get_log_content,
     run_in_subprocess,
     run_perf_wrapper,
     serialize_result,
     stop_process,
+    task_file_path,
     validate_task_id,
 )
 
@@ -38,6 +58,8 @@ def _build_perf_table(result, api_type: str = None) -> str:
 
     Returns an empty string when no valid results are found.
     """
+    if isinstance(result, SLAResult):
+        return format_sla_tables(result)
     try:
         is_emb = Metrics.is_embedding_or_rerank(api_type)
         analyzer = EmbeddingResultAnalyzer() if is_emb else LLMResultAnalyzer()
@@ -45,11 +67,31 @@ def _build_perf_table(result, api_type: str = None) -> str:
         if not analysis.rows:
             return ''
         if is_emb:
-            headers = ['并发数', '请求速率', '每秒请求数', '平均延迟(s)', 'P99延迟(s)', '平均输入TPS', 'P99输入TPS', '平均输入Token数', '成功率']
+            headers = [
+                '并发数',
+                '请求速率',
+                '每秒请求数',
+                '平均延迟(s)',
+                'P99延迟(s)',
+                '平均输入TPS',
+                'P99输入TPS',
+                '平均输入Token数',
+                '成功率',
+            ]
         else:
             headers = [
-                '并发数', '请求速率', '请求数', '每秒请求数', '平均延迟(s)', 'P99延迟(s)', '平均首字延迟(s)', 'P99首字延迟(s)', '平均每Token延迟(s)',
-                'P99每Token延迟(s)', '生成速度(toks/s)', '成功率'
+                '并发数',
+                '请求速率',
+                '请求数',
+                '每秒请求数',
+                '平均延迟(s)',
+                'P99延迟(s)',
+                '平均首字延迟(s)',
+                'P99首字延迟(s)',
+                '平均每Token延迟(s)',
+                'P99每Token延迟(s)',
+                '生成速度(toks/s)',
+                '成功率',
             ]
         return tabulate([list(r.values()) for r in analysis.rows], headers=headers, tablefmt='pipe')
     except Exception as e:
@@ -60,6 +102,34 @@ def _build_perf_table(result, api_type: str = None) -> str:
 bp_perf = Blueprint('perf', __name__, url_prefix='/api/v1/perf')
 
 
+def _send_safe_perf_report(report_file: str):
+    from evalscope.perf.utils.report.generate_report import is_current_perf_report
+
+    return send_file(report_file, mimetype='text/html', as_attachment=not is_current_perf_report(report_file))
+
+
+def _validate_performance_config(args: PerfArguments) -> None:
+    plugin = ApiRegistry.get_class(args.api)
+    if plugin.process_request is ApiPluginBase.process_request:
+        raise ValueError('This API protocol does not implement HTTP benchmarking; use a supported protocol')
+    DatasetRegistry.get_class(args.dataset)
+    if any(not math.isfinite(rate) or (rate != -1 and rate <= 0) for rate in args.rate):
+        raise ValueError('Rate must be -1 (unlimited) or positive')
+    if any(number <= 0 for number in args.number):
+        raise ValueError('Request counts must be positive integers')
+    if args.min_tokens is not None and args.min_tokens < 0:
+        raise ValueError('Min Tokens cannot be negative')
+    if isinstance(args.max_tokens, int):
+        if args.max_tokens <= 0:
+            raise ValueError('Max Tokens must be positive')
+        if args.min_tokens is not None and args.min_tokens > args.max_tokens:
+            raise ValueError('Min Tokens cannot exceed Max Tokens')
+    if args.min_prompt_length < 0 or args.max_prompt_length < args.min_prompt_length:
+        raise ValueError('Invalid prompt length range')
+    if args.dataset == 'random' and not args.tokenizer_path:
+        raise ValueError('The random dataset requires tokenizer_path')
+
+
 @bp_perf.route('/invoke', methods=['POST'])
 def run_performance_test():
     """Run a performance benchmark task (blocking).
@@ -67,10 +137,10 @@ def run_performance_test():
     Returns the benchmark result when the task completes.
     """
     data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Request body is required'}), 400
+    if not isinstance(data, dict) or not data:
+        return jsonify({'error': 'Request body must be a JSON object'}), 400
 
-    required_fields = ['model', 'url']
+    required_fields = ['model']
     for field in required_fields:
         if field not in data:
             return jsonify({'error': f'{field} is required'}), 400
@@ -87,7 +157,23 @@ def run_performance_test():
     if 'api' not in data:
         data['api'] = 'openai'
 
-    perf_args = PerfArguments.from_dict(data)
+    requires_url = data['api'] not in ('local', 'local_vllm') or bool(data.get('url'))
+    if requires_url:
+        try:
+            validate_http_endpoint(data.get('url'))
+        except ValueError as error:
+            return jsonify({'error': str(error)}), 400
+        data['url'] = data['url'].strip()
+
+    try:
+        perf_args = PerfArguments.from_dict(data)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid performance configuration'}), 400
+    try:
+        _validate_performance_config(perf_args)
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
+
     perf_args.no_timestamp = True
     perf_args.outputs_dir = os.path.join(OUTPUT_DIR, task_id)
     perf_args.name = 'perf'
@@ -95,26 +181,28 @@ def run_performance_test():
     perf_args.no_test_connection = True
 
     logger.info(f'[{task_id}] Running performance benchmark for model: {perf_args.model}')
-    logger.info(f'[{task_id}] URL: {perf_args.url}')
+    logger.info(f'[{task_id}] Endpoint: {sanitize_endpoint(perf_args.url)}')
 
     create_log_file(task_id, os.path.join('perf', 'benchmark.log'))
 
+    task_meta = build_task_info(task_id, 'perf', perf_args, perf_args.alias)
     try:
-        result = run_in_subprocess(run_perf_wrapper, perf_args, task_id=task_id)
+        result = run_in_subprocess(run_perf_wrapper, perf_args, task_id=task_id, task_meta=task_meta)
         table_str = _build_perf_table(result, api_type=perf_args.api)
+        finish_task(task_id, 'completed')
         logger.info(f'[{task_id}] Task completed successfully')
-        return jsonify({
-            'status': 'completed',
-            'task_id': task_id,
-            'result': serialize_result(result),
-            'table': table_str
-        })
+        return json_response(
+            EvalInvokeResponse,
+            {'status': 'completed', 'task_id': task_id, 'result': serialize_result(result), 'table': table_str},
+        )
     except TaskStoppedError:
+        finish_task(task_id, 'stopped')
         logger.info(f'[{task_id}] Task stopped by user.')
-        return jsonify({'status': 'stopped', 'task_id': task_id})
+        return json_response(EvalInvokeResponse, {'status': 'stopped', 'task_id': task_id})
     except Exception as e:
+        finish_task(task_id, 'error')
         logger.error(f'[{task_id}] Task failed: {e}')
-        return jsonify({'status': 'error', 'task_id': task_id, 'error': str(e)}), 500
+        return jsonify({'status': 'error', 'task_id': task_id, 'error': 'Task failed; check the task log'}), 500
 
 
 @bp_perf.route('/stop', methods=['POST'])
@@ -128,9 +216,13 @@ def stop_performance_test():
     if not task_id:
         return jsonify({'error': 'task_id is required'}), 400
 
-    stopped = stop_process(task_id)
+    try:
+        validate_task_id(task_id)
+        stopped = stop_process(task_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid task_id'}), 400
     if stopped:
-        return jsonify({'status': 'stopped', 'task_id': task_id}), 200
+        return json_response(TaskStatusResponse, {'status': 'stopped', 'task_id': task_id})
     else:
         return jsonify({'error': f'No running task found for task_id: {task_id}'}), 404
 
@@ -151,11 +243,11 @@ def get_performance_report():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
 
-    report_file = os.path.join(OUTPUT_DIR, task_id, 'perf', 'perf_report.html')
-    if not os.path.exists(report_file):
-        return jsonify({'error': f'Report not found for task_id: {task_id}'}), 404
-
-    return send_file(report_file, mimetype='text/html')
+    try:
+        report_file = perf_archive.ensure_history_report(OUTPUT_DIR, os.path.join(task_id, 'perf'))
+        return _send_safe_perf_report(report_file)
+    except PerfArchiveError as e:
+        return jsonify({'error': e.message}), e.status
 
 
 @bp_perf.route('/log', methods=['GET'])
@@ -179,7 +271,7 @@ def get_performance_log():
 
     try:
         result = get_log_content(task_id, os.path.join('perf', 'benchmark.log'), start_line, page)
-        return jsonify(result), 200
+        return json_response(LogResponse, result)
     except Exception as e:
         logger.error(f'Failed to get performance log: {str(e)}')
         return jsonify({'error': str(e)}), 500
@@ -196,13 +288,19 @@ def get_performance_progress():
     if not task_id:
         return jsonify({'error': 'task_id is required'}), 400
 
-    progress_file = os.path.join(OUTPUT_DIR, task_id, 'perf', 'progress.json')
     try:
+        validate_task_id(task_id)
+    except ValueError:
+        return jsonify({'error': 'Invalid task_id'}), 400
+    try:
+        progress_file = task_file_path(task_id, os.path.join('perf', 'progress.json'))
         with open(progress_file, 'r', encoding='utf-8') as f:
             progress = json.load(f)
-        return jsonify(progress), 200
+        return json_response(ProgressResponse, progress)
+    except ValueError:
+        return jsonify({'error': 'Invalid progress data or path'}), 400
     except FileNotFoundError:
-        return jsonify({'percent': 0.0}), 200
+        return json_response(ProgressResponse, {'percent': 0.0})
     except Exception as e:
         logger.error(f'Failed to get progress for task {task_id}: {e}')
         return jsonify({'error': str(e)}), 500
@@ -233,7 +331,14 @@ def list_perf_runs():
         # The run list exposes its numbers under stable API paths, so the semantics map is keyed
         # by those paths. The run objects themselves are unchanged.
         semantics = resolve_perf_semantics(('best_rps', 'best_latency', 'success_rate'))
-        return jsonify({'runs': runs, 'total': len(runs), 'metric_semantics': semantics}), 200
+        return json_response(
+            ListPerfRunsResponse,
+            {
+                'runs': runs,
+                'total': len(runs),
+                'metric_semantics': semantics,
+            },
+        )
     except Exception as e:
         logger.error(f'Failed to list perf runs: {e}')
         return jsonify({'error': str(e)}), 500
@@ -251,7 +356,7 @@ def get_perf_detail():
     if not rel_path:
         return jsonify({'error': 'path is required'}), 400
     try:
-        return jsonify(perf_archive.build_run_detail(_root_path(), rel_path)), 200
+        return json_response(PerfDetailResponse, perf_archive.build_run_detail(_root_path(), rel_path))
     except PerfArchiveError as e:
         return jsonify({'error': e.message}), e.status
     except Exception as e:
@@ -327,7 +432,7 @@ def list_perf_run_details():
         return jsonify({'error': 'path is required'}), 400
     try:
         items = perf_archive.list_run_items(_root_path(), rel_path)
-        return jsonify({'runs': items, 'total': len(items)}), 200
+        return json_response(PerfRunsListResponse, {'runs': items, 'total': len(items)})
     except PerfArchiveError as e:
         return jsonify({'error': e.message}), e.status
     except Exception as e:
@@ -360,7 +465,7 @@ def get_perf_requests():
             request.args.get('page', 1, type=int),
             request.args.get('page_size', 50, type=int),
         )
-        return jsonify(result), 200
+        return json_response(PerfRequestsResponse, result)
     except PerfArchiveError as e:
         return jsonify({'error': e.message}), e.status
     except Exception as e:
@@ -381,7 +486,7 @@ def get_perf_history_report():
         return jsonify({'error': 'path is required'}), 400
     try:
         report_file = perf_archive.ensure_history_report(_root_path(), rel_path)
-        return send_file(report_file, mimetype='text/html')
+        return _send_safe_perf_report(report_file)
     except PerfArchiveError as e:
         return jsonify({'error': e.message}), e.status
     except Exception as e:
@@ -412,7 +517,7 @@ def delete_perf_run():
 
     try:
         perf_archive.delete_run(_root_path(), rel_path)
-        return jsonify({'success': True, 'path': rel_path}), 200
+        return json_response(DeletePerfRunResponse, {'success': True, 'path': rel_path})
     except PerfArchiveError as e:
         return jsonify({'error': e.message}), e.status
     except Exception as e:

@@ -1,16 +1,9 @@
 import { apiDeleteValidated, apiValidated } from './client'
-import {
-  analysisResponseSchema,
-  dataFrameResponseSchema,
-  deleteReportResponseSchema,
-  listReportsResponseSchema,
-  loadReportResponseSchema,
-  predictionsResponseSchema,
-} from './schemas'
 import type {
   AnalysisResponse,
   DataFrameResponse,
   DeleteReportResponse,
+  ListReportsGroupedResponse,
   ListReportsResponse,
   LoadReportResponse,
   PredictionsResponse,
@@ -25,7 +18,7 @@ function reportPath(ref: string): string {
   return `${BASE}/runs/${encodeURIComponent(runId)}/models/${encodeURIComponent(modelId)}`
 }
 
-export async function listReports(params: {
+interface ListReportsParams {
   rootPath: string
   search?: string
   models?: string[]
@@ -36,8 +29,10 @@ export async function listReports(params: {
   pageSize?: number
   /** Optional signal to cancel a superseded list/search request. */
   signal?: AbortSignal
-}): Promise<ListReportsResponse> {
-  return apiValidated(BASE, listReportsResponseSchema, {
+}
+
+export async function listReports(params: ListReportsParams): Promise<ListReportsResponse> {
+  return apiValidated<ListReportsResponse>(BASE, {
     params: {
       root_path: params.rootPath,
       search: params.search,
@@ -52,12 +47,35 @@ export async function listReports(params: {
   })
 }
 
+/**
+ * Same listing, rolled up into one row per model (see `ReportGroup`).
+ * Display-only: the backend never reads, writes, or merges a report to
+ * build a group - it's an in-memory rollup over metadata it already loads
+ * for the flat list, so every constituent report keeps its own identity.
+ */
+export async function listReportsGrouped(params: ListReportsParams): Promise<ListReportsGroupedResponse> {
+  return apiValidated<ListReportsGroupedResponse>(BASE, {
+    params: {
+      root_path: params.rootPath,
+      search: params.search,
+      models: params.models?.join(';'),
+      datasets: params.datasets?.join(';'),
+      sort_by: params.sortBy,
+      sort_order: params.sortOrder,
+      group_by: 'model',
+      page: params.page,
+      page_size: params.pageSize,
+    },
+    signal: params.signal,
+  })
+}
+
 export async function deleteReport(
   rootPath: string,
   ref: string,
   signal?: AbortSignal,
 ): Promise<DeleteReportResponse> {
-  return apiDeleteValidated(reportPath(ref), deleteReportResponseSchema, {
+  return apiDeleteValidated<DeleteReportResponse>(reportPath(ref), {
     params: { root_path: rootPath },
     signal,
   })
@@ -68,7 +86,7 @@ export async function loadReport(
   ref: string,
   signal?: AbortSignal,
 ): Promise<LoadReportResponse> {
-  return apiValidated(reportPath(ref), loadReportResponseSchema, {
+  return apiValidated<LoadReportResponse>(reportPath(ref), {
     params: { root_path: rootPath },
     signal,
   })
@@ -81,7 +99,7 @@ export async function getDataFrame(
   datasetName?: string,
   signal?: AbortSignal,
 ): Promise<DataFrameResponse> {
-  return apiValidated(`${reportPath(ref)}/table`, dataFrameResponseSchema, {
+  return apiValidated<DataFrameResponse>(`${reportPath(ref)}/table`, {
     params: {
       root_path: rootPath,
       view,
@@ -98,7 +116,7 @@ export async function getPredictions(
   subsetName: string,
   signal?: AbortSignal,
 ): Promise<PredictionsResponse> {
-  return apiValidated(`${reportPath(ref)}/predictions`, predictionsResponseSchema, {
+  return apiValidated<PredictionsResponse>(`${reportPath(ref)}/predictions`, {
     params: {
       root_path: rootPath,
       dataset_name: datasetName,
@@ -114,7 +132,7 @@ export async function getAnalysis(
   datasetName: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const res: AnalysisResponse = await apiValidated(`${reportPath(ref)}/analysis`, analysisResponseSchema, {
+  const res = await apiValidated<AnalysisResponse>(`${reportPath(ref)}/analysis`, {
     params: {
       root_path: rootPath,
       dataset_name: datasetName,

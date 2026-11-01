@@ -40,6 +40,7 @@ SIQA (Social Interaction QA) is a benchmark for evaluating social commonsense in
         tags=[Tags.COMMONSENSE, Tags.REASONING, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/siqa',
+        hf_dataset_id='extraordinarylab/siqa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split=None,
@@ -48,7 +49,6 @@ SIQA (Social Interaction QA) is a benchmark for evaluating social commonsense in
     )
 )
 class SIQAAdapter(MultiChoiceAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

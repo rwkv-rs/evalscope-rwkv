@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Literal, Optional, Protocol, Tuple, Union, c
 
 import torch  # type: ignore
 from modelscope import AutoModelForCausalLM, AutoTokenizer
-from torch import Tensor  # type: ignore
 from typing_extensions import override
 
 from evalscope.api.messages import (
@@ -36,13 +35,13 @@ from evalscope.api.model import (
     TopLogprob,
 )
 from evalscope.api.tool import ToolChoice, ToolInfo
+from evalscope.models.utils.tool_call_text import parse_tool_calls_from_text
 from evalscope.utils.model_utils import get_device
 
 logger = getLogger()
 
 
 class ModelScopeAPI(ModelAPI):
-
     def __init__(
         self,
         model_name: str,
@@ -91,7 +90,7 @@ class ModelScopeAPI(ModelAPI):
             'torch.float32': torch.float32,
             'float64': torch.float64,
             'torch.float64': torch.float64,
-            'auto': 'auto'
+            'auto': 'auto',
         }
 
         if isinstance(torch_dtype, str) and torch_dtype != 'auto':
@@ -106,7 +105,7 @@ class ModelScopeAPI(ModelAPI):
             token=self.api_key,
             torch_dtype=self.torch_dtype,
             trust_remote_code=True,
-            **model_args
+            **model_args,
         )
 
         # tokenizer
@@ -216,32 +215,44 @@ class ModelScopeAPI(ModelAPI):
                 )
 
             # construct choice
-            # TODO: Handle tool calls
+            content, tool_calls = parse_tool_calls_from_text(response.output, tools)
+            # A parsed call is what a tool-calling benchmark reads as the model's
+            # choice. The local path only reports stop/max_tokens, so mirror the
+            # hosted providers and report tool_calls when a call was parsed.
+            stop_reason = 'tool_calls' if tool_calls else response.stop_reason
             choice = ChatCompletionChoice(
-                message=ChatMessageAssistant(content=response.output, model=self.model_name, source='generate'),
+                message=ChatMessageAssistant(
+                    content=content, tool_calls=tool_calls, model=self.model_name, source='generate'
+                ),
                 logprobs=(Logprobs(content=final_logprobs) if final_logprobs is not None else None),
-                stop_reason=response.stop_reason,
+                stop_reason=stop_reason,
             )
             choices.append(choice)
+
+        # Aggregate usage over all returned choices: with n > 1 the loop above
+        # leaves `response` bound to the last choice only, undercounting tokens.
+        input_tokens = sum(r.input_tokens for r in responses)
+        output_tokens = sum(r.output_tokens for r in responses)
+        total_time = max(r.time for r in responses)
 
         # return output
         output = ModelOutput(
             model=self.model_name,
             choices=choices,
             usage=ModelUsage(
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                total_tokens=response.total_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
             ),
-            time=response.time,
+            time=total_time,
         )
         # Populate PerformanceMetrics from the already-available fields.
         # Local models do not produce TTFT (no streaming chunks), so ttft stays None.
         output.message.perf_metrics = PerformanceMetrics(
-            latency=response.time,
+            latency=total_time,
             ttft=None,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
         return output
 
@@ -250,7 +261,6 @@ class ModelScopeAPI(ModelAPI):
         """Default is 2048, bump it up to a value suitable for evals."""
         return 2048
 
-    @override
     def max_connections(self) -> int:
         """Effectively the batch size."""
         return 8
@@ -303,26 +313,20 @@ def message_content_to_string(messages: List[ChatMessage]) -> List[ChatMessage]:
 
 # return value from generate as a result of specifying return_dict_in_generate
 class ModelGenerateOutput:
-    sequences: Tensor
-    logits: tuple[Tensor]
+    sequences: torch.Tensor
+    logits: tuple[torch.Tensor]
 
 
 class Tokenizer(Protocol):
-
-    def __call__(self, input: List[str]) -> Dict[Literal['input_ids', 'attention_mask'], Tensor]:
-        ...
+    def __call__(self, input: List[str]) -> Dict[Literal['input_ids', 'attention_mask'], torch.Tensor]: ...
 
 
 class Generator(Protocol):
-
-    def __call__(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
-        ...
+    def __call__(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor: ...
 
 
 class Decoder(Protocol):
-
-    def __call__(self, sequences: Tensor) -> list[str]:
-        ...
+    def __call__(self, sequences: torch.Tensor) -> list[str]: ...
 
 
 @dataclass
@@ -426,7 +430,7 @@ def process_batches() -> None:
                 logprobs = torch.nn.functional.log_softmax(stacked_logits, dim=-1)
 
             # decode
-            generated_tokens = generate_ids[:, input_ids.size(dim=1):]
+            generated_tokens = generate_ids[:, input_ids.size(dim=1) :]
             if logprobs is not None:
                 assert logprobs.shape[1] == generated_tokens.shape[1]
             outputs = decoder(sequences=generated_tokens)
@@ -500,11 +504,13 @@ def extract_logprobs(
             # TODO: you get byte artifacts converting single ids to tokens like this...
             # but `tokenizer.decode` strips spaces. There must be a better way to do this.
             token_str = tokenizer.convert_ids_to_tokens(tok.item())
-            top_logprobs.append(TopLogprob(
-                token=token_str,
-                logprob=val,
-                bytes=list(map(ord, token_str)),
-            ))
+            top_logprobs.append(
+                TopLogprob(
+                    token=token_str,
+                    logprob=val,
+                    bytes=list(map(ord, token_str)),
+                )
+            )
         final_logprobs.append(
             Logprob(
                 token=top_logprobs[0].token,

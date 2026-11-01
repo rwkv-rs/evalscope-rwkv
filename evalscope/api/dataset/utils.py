@@ -6,7 +6,9 @@ from tqdm import tqdm
 from .dataset import Dataset, FieldSpec, Sample
 
 
-def record_to_sample_fn(sample_fields: Union[FieldSpec, Callable, None] = None, ) -> Callable:
+def record_to_sample_fn(
+    sample_fields: Union[FieldSpec, Callable, None] = None,
+) -> Callable:
     if sample_fields is None:
         sample_fields = FieldSpec()
 
@@ -14,7 +16,7 @@ def record_to_sample_fn(sample_fields: Union[FieldSpec, Callable, None] = None, 
 
         def record_to_sample(record: dict) -> Sample:
             # collect metadata if specified
-            metadata: Optional[Dict[str, Any]] = None
+            metadata: Dict[str, Any] = {}
             if sample_fields.metadata:
                 if isinstance(sample_fields.metadata, list):
                     metadata = {}

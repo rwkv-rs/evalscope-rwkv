@@ -2,6 +2,7 @@ import inspect
 import math
 import re
 from collections import defaultdict
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -35,7 +36,8 @@ def process_review_item(review_result: ReviewResult) -> list:
         'Input': review_result.messages_markdown,
         'Question': review_result.messages_markdown,  # Use rendered messages as question
         'Generated': prediction
-        if prediction != extracted_prediction else extracted_prediction or '',  # Ensure no None value
+        if prediction != extracted_prediction
+        else extracted_prediction or '',  # Ensure no None value
         'Gold': target,
         'Pred': extracted_prediction,
         'Score': sample_score.score.model_dump(exclude_none=True),
@@ -157,7 +159,7 @@ def compute_mle_elo(df, scale=400, base=10, init_rating=1000, baseline_model='gp
     # one tie => one A win + one B win
     # find tie + tie (both bad) index
     tie_idx = (df['winner'] == 'tie') | (df['winner'] == 'tie (bothbad)')
-    tie_idx[len(tie_idx) // 2:] = False
+    tie_idx[len(tie_idx) // 2 :] = False
     Y[tie_idx] = 1.0
 
     if len(np.unique(Y)) < 2:
@@ -170,6 +172,7 @@ def compute_mle_elo(df, scale=400, base=10, init_rating=1000, baseline_model='gp
         return elo_scores.sort_values(ascending=False)
 
     from sklearn.linear_model import LogisticRegression
+
     lr = LogisticRegression(
         fit_intercept=False, penalty=None, tol=1e-8
     )  # May need to set a small value when not use GPT4 as judge model
@@ -183,13 +186,21 @@ def compute_mle_elo(df, scale=400, base=10, init_rating=1000, baseline_model='gp
     return pd.Series(elo_scores, index=models.index).sort_values(ascending=False)
 
 
-def get_bootstrap_result(battles, func_compute_elo, num_round, baseline_model='gpt-4-0314'):
+def get_bootstrap_result(
+    battles: pd.DataFrame,
+    func_compute_elo: Callable[..., Optional[pd.Series]],
+    num_round: int,
+    baseline_model: str = 'gpt-4-0314',
+    seed: Optional[int] = 42,
+) -> pd.DataFrame:
+    """Bootstrap ELO ratings with an isolated RNG; None uses fresh entropy."""
+    rng = np.random.default_rng(seed)
     rows = []
     kwargs = {}
     if 'baseline_model' in inspect.signature(func_compute_elo).parameters:
         kwargs['baseline_model'] = baseline_model
     for _ in tqdm(range(num_round), desc='bootstrap'):
-        res = func_compute_elo(battles.sample(frac=1.0, replace=True), **kwargs)
+        res = func_compute_elo(battles.sample(frac=1.0, replace=True, random_state=rng), **kwargs)
         if res is not None:
             rows.append(res)
     df = pd.DataFrame(rows)
@@ -201,7 +212,7 @@ def predict_win_rate(elo_ratings, scale=400, base=10, init_rating=1000):
     wins = defaultdict(lambda: defaultdict(lambda: 0))
     for a in names:
         for b in names:
-            ea = 1 / (1 + base**((elo_ratings[b] - elo_ratings[a]) / scale))
+            ea = 1 / (1 + base ** ((elo_ratings[b] - elo_ratings[a]) / scale))
             wins[a][b] = ea
             wins[b][a] = 1 - ea
 

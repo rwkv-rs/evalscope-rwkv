@@ -95,6 +95,7 @@ def parse_count(prediction: str) -> Optional[int]:
         name='count_qa',
         pretty_name='CountQA',
         dataset_id='evalscope/CountQA',
+        hf_dataset_id='Jayant-Sravan/CountQA',
         tags=[Tags.MULTI_MODAL, Tags.QA, Tags.REASONING],
         description=DESCRIPTION,
         paper_url='https://arxiv.org/abs/2508.06585',
@@ -158,8 +159,10 @@ class CountQAAdapter(VisionLanguageAdapter):
             predicted_count = int(filtered_prediction)
             exact = float(predicted_count == reference_count)
             # A ground truth of 0 has no meaningful relative tolerance, so it stays exact.
-            relaxed = exact if reference_count == 0 else float(
-                abs(predicted_count - reference_count) <= RELAXED_TOLERANCE * reference_count
+            relaxed = (
+                exact
+                if reference_count == 0
+                else float(abs(predicted_count - reference_count) <= RELAXED_TOLERANCE * reference_count)
             )
         else:
             exact = relaxed = 0.0

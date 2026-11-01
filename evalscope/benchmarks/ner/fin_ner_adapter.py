@@ -33,9 +33,11 @@ The FinNER dataset is a corpus of financial agreements from public U.S. Security
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='fin_ner',
         pretty_name='FinNER',
         dataset_id='extraordinarylab/fin-ner',
+        hf_dataset_id='extraordinarylab/fin-ner',
         tags=[Tags.KNOWLEDGE, Tags.NER],
         description=DESCRIPTION,
         few_shot_num=5,
@@ -48,7 +50,6 @@ The FinNER dataset is a corpus of financial agreements from public U.S. Security
     )
 )
 class FinNERAdapter(NERAdapter):
-
     def __init__(self, **kwargs):
         # Initialize the parent class first
         super().__init__(**kwargs)
@@ -61,7 +62,7 @@ class FinNERAdapter(NERAdapter):
             'PER': 'Names of persons, including lenders and borrowers.',
             'ORG': 'Names of organizations, such as companies and financial institutions.',
             'LOC': 'Names of locations, including addresses.',
-            'MISC': 'Miscellaneous named entities which do not belong to the previous three.'
+            'MISC': 'Miscellaneous named entities which do not belong to the previous three.',
         }
 
         # Setup entity mappings based on the defined entity types

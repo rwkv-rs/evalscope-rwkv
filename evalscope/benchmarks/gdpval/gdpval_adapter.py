@@ -79,9 +79,11 @@ deliverable files. This adapter targets OpenAI's public 220-task gold subset mir
   `extra_params.auto_build_docker_image=false` to require a pre-built `evalscope/gdpval:latest`. Override the image,
   network, CPU or memory settings through `TaskConfig.sandbox.default_config`.
 - `submission_ready` is a local readiness metric: it is 1 when the model produced final text or at least one
-  deliverable file. It is not an official GDPval quality score.
-- EvalScope does not run a local GDPval judge. Use the exported submission package with OpenAI's official GDPval judge
-  to obtain quality scores.
+  deliverable file. It is not a GDPval quality score.
+- EvalScope does not run a GDPval quality judge, and OpenAI no longer accepts hosted grading requests. Use the exported
+  submission package with the public rubrics and gold deliverables in your own grading workflow. Pairwise human expert
+  preference is the standard; an LLM-based judge provides only a rough, non-official estimate. See
+  [OpenAI's current grading guidance](https://evals.openai.com/gdpval/grading).
 - Full document/spreadsheet/slide quality depends on the GDPval runtime image. Thin Python images are useful only for
   plumbing smoke tests.
 
@@ -89,7 +91,8 @@ deliverable files. This adapter targets OpenAI's public 220-task gold subset mir
 
 - EvalScope writes a local submission folder under the reports directory.
 - The submission contains `deliverable_text` and `deliverable_files` fields in the GDPval dataset format.
-- Official GDPval grading is external. Run OpenAI's official GDPval judge on the exported submission package.
+- Quality grading is external. Use the exported deliverables, public rubrics, and gold deliverables for pairwise human
+  review or a custom LLM judge; custom LLM-judge results are not official GDPval scores.
 """
 
 _PROMPT_SUFFIX = f"""
@@ -141,14 +144,11 @@ class GDPvalAdapter(AgentLoopAdapter):
         self._submission_records: List[Dict[str, Any]] = []
 
     @property
-    def source_dataset_hub(self) -> str:
-        return self.dataset_hub or HubType.MODELSCOPE
-
-    @property
     def source_dataset(self) -> DatasetHub:
         return DatasetHub(
             data_id_or_path=self.dataset_id,
-            data_source=self.source_dataset_hub,
+            data_source=self.dataset_hub,
+            revision=self.dataset_revision,
             force_redownload=self.force_redownload,
         )
 
@@ -158,7 +158,7 @@ class GDPvalAdapter(AgentLoopAdapter):
         reference_file_hf_uris = as_list(record.get('reference_file_hf_uris'))
         sandbox_reference_paths = [sandbox_reference_path(path) for path in reference_files]
         reference_hint = format_reference_hint(sandbox_reference_paths)
-        prompt = f"{record['prompt'].strip()}\n{reference_hint}{_PROMPT_SUFFIX}"
+        prompt = f'{record["prompt"].strip()}\n{reference_hint}{_PROMPT_SUFFIX}'
 
         return Sample(
             input=prompt,
@@ -177,7 +177,7 @@ class GDPvalAdapter(AgentLoopAdapter):
                 'rubric_pretty': record.get('rubric_pretty'),
                 'rubric_json': record.get('rubric_json'),
                 'dataset_id': self.dataset_id,
-                'dataset_hub': self.source_dataset_hub,
+                'dataset_hub': self.dataset_hub,
             },
         )
 
@@ -248,7 +248,9 @@ class GDPvalAdapter(AgentLoopAdapter):
             'artifact_dir': task_state.metadata.get('artifact_dir'),
             'official_gdpval_score': None,
             'official_gdpval_score_note': (
-                'GDPval official grading is external. Use OpenAI\'s official GDPval judge on the exported submission.'
+                'OpenAI no longer accepts hosted GDPval grading requests. Use the exported submission with public '
+                'rubrics and gold deliverables in your own human or LLM-judge workflow; LLM-judge results are '
+                'non-official estimates, and EvalScope does not compute quality scores.'
             ),
         }
         score = Score(
@@ -297,5 +299,5 @@ class GDPvalAdapter(AgentLoopAdapter):
             subset_list=self.subset_list,
             benchmark_name=self.name,
             dataset_id=self.dataset_id,
-            dataset_hub=self.source_dataset_hub,
+            dataset_hub=self.dataset_hub,
         )

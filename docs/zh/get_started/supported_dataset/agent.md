@@ -5,6 +5,9 @@
 | 数据集名称 | 标准名称 | 任务类别 |
 |------------|----------|----------|
 | `acebench` | [ACEBench](../../benchmarks/acebench.md) | `Agent`, `FunctionCalling`, `MultiTurn` |
+| `agentdojo` | [AgentDojo](../../benchmarks/agentdojo.md) | `Agent`, `FunctionCalling`, `Safety` |
+| `agentharm` | [AgentHarm](../../benchmarks/agentharm.md) | `Agent`, `FunctionCalling`, `Safety` |
+| `agentharm_benign` | [AgentHarm Benign](../../benchmarks/agentharm_benign.md) | `Agent`, `FunctionCalling`, `Safety` |
 | `automation_bench` | [AutomationBench](../../benchmarks/automation_bench.md) | `Agent`, `FunctionCalling`, `MultiTurn` |
 | `bfcl_v3` | [BFCL-v3](../../benchmarks/bfcl_v3.md) | `Agent`, `FunctionCalling` |
 | `bfcl_v4` | [BFCL-v4](../../benchmarks/bfcl_v4.md) | `Agent`, `FunctionCalling` |
@@ -34,6 +37,7 @@
 | `tau_bench` | [τ-bench](../../benchmarks/tau_bench.md) | `Agent`, `FunctionCalling`, `Reasoning` |
 | `terminal_bench_v2` | [Terminal-Bench-2.0](../../benchmarks/terminal_bench_v2.md) | `Coding` |
 | `terminal_bench_v2_1` | [Terminal-Bench-2.1](../../benchmarks/terminal_bench_v2_1.md) | `Coding` |
+| `terminal_bench_v4` | [Terminal-Bench-4.0](../../benchmarks/terminal_bench_v4.md) | `Coding` |
 | `toolathlon` | [Toolathlon Official Service Wrapper](../../benchmarks/toolathlon.md) | `Agent`, `FunctionCalling`, `MultiTurn` |
 | `wide_search` | [WideSearch](../../benchmarks/wide_search.md) | `Agent`, `MultiTurn`, `Retrieval` |
 
@@ -42,6 +46,9 @@
 :maxdepth: 1
 
 ../../benchmarks/acebench.md
+../../benchmarks/agentdojo.md
+../../benchmarks/agentharm.md
+../../benchmarks/agentharm_benign.md
 ../../benchmarks/automation_bench.md
 ../../benchmarks/bfcl_v3.md
 ../../benchmarks/bfcl_v4.md
@@ -71,6 +78,7 @@
 ../../benchmarks/tau_bench.md
 ../../benchmarks/terminal_bench_v2.md
 ../../benchmarks/terminal_bench_v2_1.md
+../../benchmarks/terminal_bench_v4.md
 ../../benchmarks/toolathlon.md
 ../../benchmarks/wide_search.md
 :::

@@ -82,6 +82,7 @@ the translated question/choices.
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MULTI_LINGUAL],
         description=BHASHA_BENCH_MULTI_DESCRIPTION_TEMPLATE.format(domain='Ayurveda', domain_desc='Ayurvedic medicine'),
         dataset_id='bharatgenai/BhashaBench-Multi',
+        hf_dataset_id='bharatgenai/BhashaBench-Multi',
         default_subset='BBA',
         metric_list=['acc'],
         subset_list=LANGUAGE_SPLITS,
@@ -92,7 +93,6 @@ the translated question/choices.
     )
 )
 class BhashaBenchMultiAyurAdapter(MultiChoiceAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.split_as_subset = True
@@ -119,6 +119,7 @@ class BhashaBenchMultiAyurAdapter(MultiChoiceAdapter):
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MULTI_LINGUAL],
         description=BHASHA_BENCH_MULTI_DESCRIPTION_TEMPLATE.format(domain='Finance', domain_desc='finance'),
         dataset_id='bharatgenai/BhashaBench-Multi',
+        hf_dataset_id='bharatgenai/BhashaBench-Multi',
         default_subset='BBF',
         metric_list=['acc'],
         subset_list=LANGUAGE_SPLITS,
@@ -128,8 +129,7 @@ class BhashaBenchMultiAyurAdapter(MultiChoiceAdapter):
         prompt_template=MultipleChoiceTemplate.SINGLE_ANSWER,
     )
 )
-class BhashaBenchMultiFinanceAdapter(BhashaBenchMultiAyurAdapter):
-    ...
+class BhashaBenchMultiFinanceAdapter(BhashaBenchMultiAyurAdapter): ...
 
 
 @register_benchmark(
@@ -139,6 +139,7 @@ class BhashaBenchMultiFinanceAdapter(BhashaBenchMultiAyurAdapter):
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MULTI_LINGUAL],
         description=BHASHA_BENCH_MULTI_DESCRIPTION_TEMPLATE.format(domain='Krishi', domain_desc='agriculture (Krishi)'),
         dataset_id='bharatgenai/BhashaBench-Multi',
+        hf_dataset_id='bharatgenai/BhashaBench-Multi',
         default_subset='BBK',
         metric_list=['acc'],
         subset_list=LANGUAGE_SPLITS,
@@ -148,8 +149,7 @@ class BhashaBenchMultiFinanceAdapter(BhashaBenchMultiAyurAdapter):
         prompt_template=MultipleChoiceTemplate.SINGLE_ANSWER,
     )
 )
-class BhashaBenchMultiKrishiAdapter(BhashaBenchMultiAyurAdapter):
-    ...
+class BhashaBenchMultiKrishiAdapter(BhashaBenchMultiAyurAdapter): ...
 
 
 @register_benchmark(
@@ -159,6 +159,7 @@ class BhashaBenchMultiKrishiAdapter(BhashaBenchMultiAyurAdapter):
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MULTI_LINGUAL],
         description=BHASHA_BENCH_MULTI_DESCRIPTION_TEMPLATE.format(domain='Legal', domain_desc='Indian law'),
         dataset_id='bharatgenai/BhashaBench-Multi',
+        hf_dataset_id='bharatgenai/BhashaBench-Multi',
         default_subset='BBL',
         metric_list=['acc'],
         subset_list=LANGUAGE_SPLITS,
@@ -168,5 +169,4 @@ class BhashaBenchMultiKrishiAdapter(BhashaBenchMultiAyurAdapter):
         prompt_template=MultipleChoiceTemplate.SINGLE_ANSWER,
     )
 )
-class BhashaBenchMultiLegalAdapter(BhashaBenchMultiAyurAdapter):
-    ...
+class BhashaBenchMultiLegalAdapter(BhashaBenchMultiAyurAdapter): ...

@@ -59,6 +59,7 @@ ANSWER_FORMAT_SUFFIX = '\nThink about the question and give your final answer in
         name='baby_vision',
         pretty_name='BabyVision',
         dataset_id='evalscope/BabyVision',
+        hf_dataset_id='UnipatAI/BabyVision',
         tags=[Tags.MULTI_MODAL, Tags.REASONING, Tags.QA],
         description=DESCRIPTION,
         subset_list=SUBSET_LIST,
@@ -71,6 +72,7 @@ class BabyVisionAdapter(VisionLanguageAdapter):
 
     Handles both choice and blank answer types uniformly with LLM judge scoring.
     """
+
     scoring_policy = ScoringPolicy.JUDGE_ONLY
 
     def __init__(self, **kwargs):

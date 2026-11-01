@@ -157,7 +157,8 @@ def _anthropic_internal_from_block(block: Dict[str, Any]) -> Optional[Dict[str, 
 
 def _has_anthropic_cache_control(internal: Any) -> bool:
     return (
-        isinstance(internal, dict) and isinstance(internal.get('anthropic'), dict)
+        isinstance(internal, dict)
+        and isinstance(internal.get('anthropic'), dict)
         and isinstance(internal['anthropic'].get('cache_control'), dict)
     )
 
@@ -188,10 +189,12 @@ def anthropic_tools_to_tool_infos(tools: Sequence[Dict[str, Any]]) -> List[ToolI
 def _safe_tool_params(schema: Dict[str, Any]) -> ToolParams:
     try:
         # ToolParams.type is Literal['object']; only forward properties/required.
-        return ToolParams.model_validate({
-            'properties': schema.get('properties', {}) or {},
-            'required': schema.get('required', []) or [],
-        })
+        return ToolParams.model_validate(
+            {
+                'properties': schema.get('properties', {}) or {},
+                'required': schema.get('required', []) or [],
+            }
+        )
     except Exception:
         return ToolParams()
 
@@ -210,16 +213,18 @@ def model_output_to_anthropic_response(
             blocks.append({'type': 'text', 'text': text})
         for tc in message.tool_calls or []:
             name, args = unpack_tool_call(tc)
-            blocks.append({
-                'type': 'tool_use',
-                'id': tc.id,
-                'name': name,
-                'input': args,
-            })
+            blocks.append(
+                {
+                    'type': 'tool_use',
+                    'id': tc.id,
+                    'name': name,
+                    'input': args,
+                }
+            )
     if not blocks:
         blocks.append({'type': 'text', 'text': ''})
 
-    stop_reason = map_stop_reason_to_anthropic(output.choices[0].stop_reason if output.choices else 'stop')
+    stop_reason = anthropic_stop_reason(output)
     usage = anthropic_usage_payload(output.usage)
     return {
         'id': output.id or f'msg_{uuid.uuid4().hex[:24]}',
@@ -250,6 +255,23 @@ def map_stop_reason_to_anthropic(reason: str) -> str:
     table lives in exactly one place.
     """
     return _STOP_REASON_MAP.get(reason, 'end_turn')
+
+
+def anthropic_stop_reason(output: ModelOutput) -> str:
+    """Anthropic ``stop_reason`` for ``output``.
+
+    Some OpenAI-compatible backends (Gemini) finish a tool-calling turn with
+    ``finish_reason: "stop"``. A ``tool_use`` block with ``end_turn`` makes the
+    Anthropic client treat the turn as final and not run the tool, so a message
+    that carries tool calls reports ``tool_use`` when the original reason is
+    ``stop``. ``content_filter``, ``unknown`` and truncation are left as mapped.
+    """
+    if not output.choices:
+        return map_stop_reason_to_anthropic('stop')
+    choice = output.choices[0]
+    if choice.stop_reason == 'stop' and choice.message.tool_calls:
+        return 'tool_use'
+    return map_stop_reason_to_anthropic(choice.stop_reason)
 
 
 def anthropic_usage_payload(usage: Any) -> Dict[str, Any]:

@@ -3,10 +3,10 @@
 
 The 'app' command is deprecated.  Use 'evalscope service' instead.
 """
-import warnings
-from argparse import ArgumentParser
 
-from evalscope.cli.base import CLICommand
+import warnings
+
+from evalscope.cli.base import ArgumentParserWithSubParsers, CLICommand
 
 
 def subparser_func(args):
@@ -21,7 +21,7 @@ class StartAppCMD(CLICommand):
         self.args = args
 
     @staticmethod
-    def define_args(parsers: ArgumentParser):
+    def define_args(parsers: ArgumentParserWithSubParsers) -> None:
         """Define args for app command (deprecated alias for service)."""
         parser = parsers.add_parser(
             StartAppCMD.name,

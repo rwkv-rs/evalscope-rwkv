@@ -43,8 +43,8 @@ def evaluate(args: ClipBenchmarkEvalConfig):
         # Skip evaluation if the result already exists and skip_existing is True
         if os.path.exists(output_file) and skip_existing:
             if verbose:
-                logger.info(f'Skip {output_dir}, exists already.')
-            return
+                logger.info(f'Skip {output_file}, exists already.')
+            continue
 
         # Determine device (CPU or GPU)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -66,13 +66,11 @@ def evaluate(args: ClipBenchmarkEvalConfig):
 
         # Evaluate based on the task
         if task == 'zeroshot_classification':
-            zeroshot_templates = (dataset.templates if hasattr(dataset, 'templates') else None)
+            zeroshot_templates = dataset.templates if hasattr(dataset, 'templates') else None
             if verbose:
                 logger.info(f'Zero-shot templates: {zeroshot_templates}')
             classnames = dataset.classes if hasattr(dataset, 'classes') else None
-            assert (
-                zeroshot_templates is not None and classnames is not None
-            ), 'Dataset does not support classification'
+            assert zeroshot_templates is not None and classnames is not None, 'Dataset does not support classification'
             metrics = zeroshot_classification.evaluate(
                 model,
                 dataloader,
@@ -104,7 +102,3 @@ def evaluate(args: ClipBenchmarkEvalConfig):
             logger.info(f'Dump results to: {output_file}')
         with open(output_file, 'w') as f:
             json.dump(dump, f)
-
-
-if __name__ == '__main__':
-    evaluate()

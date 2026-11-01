@@ -1,13 +1,9 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
-import os
-from argparse import ArgumentParser
-
-from evalscope.cli.base import CLICommand
+from evalscope.cli.base import ArgumentParserWithSubParsers, CLICommand
 
 
 def subparser_func(args):
-    """ Function which will be called for a specific sub parser.
-    """
+    """Function which will be called for a specific sub parser."""
     return PerfBenchCMD(args)
 
 
@@ -18,9 +14,8 @@ class PerfBenchCMD(CLICommand):
         self.args = args
 
     @staticmethod
-    def define_args(parsers: ArgumentParser):
-        """ define args for create pipeline template command.
-        """
+    def define_args(parsers: ArgumentParserWithSubParsers) -> None:
+        """define args for create pipeline template command."""
         from evalscope.perf.arguments import add_argument
 
         parser = parsers.add_parser(PerfBenchCMD.name)
@@ -29,11 +24,14 @@ class PerfBenchCMD(CLICommand):
 
     def execute(self):
         try:
-            from evalscope.perf.main import run_perf_benchmark
+            from evalscope.perf.main import PerfBenchmarkInterrupted, run_perf_benchmark
         except ImportError as e:
             raise ImportError(
                 f'Failed to import run_perf_benchmark from evalscope.perf.main, due to {e}. '
                 "Please run `pip install 'evalscope[perf]'`."
             )
 
-        run_perf_benchmark(self.args)
+        try:
+            run_perf_benchmark(self.args)
+        except PerfBenchmarkInterrupted as e:
+            raise SystemExit(e.exit_code) from None

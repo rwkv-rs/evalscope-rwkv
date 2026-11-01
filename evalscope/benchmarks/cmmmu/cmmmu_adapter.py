@@ -98,6 +98,7 @@ CMMU (Chinese Massive Multi-discipline Multimodal Understanding) includes manual
 - Chinese language prompts used
 """,  # noqa: E501
         dataset_id='lmms-lab/CMMMU',
+        hf_dataset_id='lmms-lab/CMMMU',
         subset_list=SUBSET_LIST,
         metric_list=['acc'],
         eval_split='val',
@@ -188,7 +189,7 @@ class CMMMUAdapter(VisionLanguageAdapter):
             formatted_options = ''
             start_chr = 'A'
             for i in range(1, 5):
-                formatted_options += f"({start_chr}) {record[f'option{i}']}\n"
+                formatted_options += f'({start_chr}) {record[f"option{i}"]}\n'
                 start_chr = chr(ord(start_chr) + 1)
 
             current_example_template = PROMPT['multi_choice_example_format'][0]

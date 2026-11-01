@@ -79,6 +79,7 @@ _CONTAINER_CORPUS_DIR = '/corpus'
         name='officeqa',
         pretty_name='OfficeQA',
         dataset_id='evalscope/officeqa',
+        hf_dataset_id='databricks/officeqa',
         tags=[Tags.AGENT, Tags.QA, Tags.KNOWLEDGE],
         description=DESCRIPTION,
         subset_list=['officeqa_pro'],
@@ -90,7 +91,6 @@ _CONTAINER_CORPUS_DIR = '/corpus'
     )
 )
 class OfficeQAAdapter(AgentLoopAdapter):
-
     strategy_name: str = 'function_calling'
     max_steps_default: int = 15
 
@@ -146,18 +146,15 @@ class OfficeQAAdapter(AgentLoopAdapter):
     def build_environment(self, sample: Sample) -> Optional[AgentEnvironment]:
         if self._task_config.sandbox and self._task_config.sandbox.enabled:
             from evalscope.agent.environments.enclave import EnclaveAgentEnvironment
+
             sandbox_config = {
                 'working_dir': _CONTAINER_CORPUS_DIR,
-                'volumes': {
-                    self._corpus_dir: {
-                        'bind': _CONTAINER_CORPUS_DIR,
-                        'mode': 'ro'
-                    }
-                },
+                'volumes': {self._corpus_dir: {'bind': _CONTAINER_CORPUS_DIR, 'mode': 'ro'}},
             }
             return EnclaveAgentEnvironment(engine='docker', sandbox_config=sandbox_config)
 
         from evalscope.agent.environments.local import LocalAgentEnvironment
+
         return LocalAgentEnvironment(working_dir=self._corpus_dir)
 
     def build_initial_messages(self, sample: Sample) -> List[Any]:
@@ -170,10 +167,13 @@ class OfficeQAAdapter(AgentLoopAdapter):
 
     def build_strategy(self, sample: Any) -> Any:
         from evalscope.api.registry import get_strategy
+
         strategy_cls = get_strategy(self.strategy_name)
-        corpus_dir = _CONTAINER_CORPUS_DIR if (
-            self._task_config.sandbox and self._task_config.sandbox.enabled
-        ) else self._corpus_dir
+        corpus_dir = (
+            _CONTAINER_CORPUS_DIR
+            if (self._task_config.sandbox and self._task_config.sandbox.enabled)
+            else self._corpus_dir
+        )
         return strategy_cls(system_prompt=SYSTEM_PROMPT.format(corpus_dir=corpus_dir))
 
     # ------------------------------------------------------------------

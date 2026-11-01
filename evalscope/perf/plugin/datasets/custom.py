@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Iterator, List
+from typing import Dict, Iterator, List
 
 from evalscope.perf.arguments import Arguments
 from evalscope.perf.plugin.datasets.base import Conversation, DatasetPluginBase, Message, Messages, Turn
@@ -11,8 +11,7 @@ logger = get_logger()
 
 @register_dataset('custom')
 class CustomDatasetPlugin(DatasetPluginBase):
-    """Read dataset and return prompt.
-    """
+    """Read dataset and return prompt."""
 
     def __init__(self, query_parameters: Arguments):
         super().__init__(query_parameters)

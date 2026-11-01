@@ -54,7 +54,6 @@ class MetricsConstant:
 
 
 class ArenaWinner:
-
     MODEL_A = 'model_a'
     MODEL_B = 'model_b'
     TIE = 'tie'
@@ -73,7 +72,6 @@ class AnswerKeys:
 
 
 class EvalType:
-
     CUSTOM = 'custom'
     MOCK_LLM = 'mock_llm'
     CHECKPOINT = 'llm_ckpt'  # native model checkpoint
@@ -81,6 +79,8 @@ class EvalType:
     TEXT2SPEECH = 'text2speech'  # text-to-speech service
     IMAGE_EDITING = 'image_editing'  # image editing service
     OPENAI_API = 'openai_api'
+    SYSTEMONE_API = 'systemone_api'
+    AUTOTRUST_API = 'autotrust_api'
     OPENAI_RESPONSES_API = 'openai_responses_api'
     ANTHROPIC_API = 'anthropic_api'
     LITELLM = 'litellm'
@@ -175,7 +175,9 @@ class ModelTask:
 
 class Tags:
     KNOWLEDGE = 'Knowledge'
+    SAFETY = 'Safety'
     MULTIPLE_CHOICE = 'MCQ'
+    DECISION = 'Decision'
     MATH = 'Math'
     REASONING = 'Reasoning'
     CODING = 'Coding'
@@ -223,23 +225,28 @@ class VisualizerType:
 PLOTLY_THEME = 'plotly_dark'
 PLOTLY_CDN_URL = 'https://resources.modelscope.cn/third-part/js/plotly/plotly-2.35.2.min.js'
 DEFAULT_BAR_WIDTH = 0.2
-LATEX_DELIMITERS = [{
-    'left': '$$',
-    'right': '$$',
-    'display': True,
-}, {
-    'left': '$',
-    'right': '$',
-    'display': False,
-}, {
-    'left': '\\(',
-    'right': '\\)',
-    'display': False,
-}, {
-    'left': '\\[',
-    'right': '\\]',
-    'display': True,
-}]
+LATEX_DELIMITERS = [
+    {
+        'left': '$$',
+        'right': '$$',
+        'display': True,
+    },
+    {
+        'left': '$',
+        'right': '$',
+        'display': False,
+    },
+    {
+        'left': '\\(',
+        'right': '\\)',
+        'display': False,
+    },
+    {
+        'left': '\\[',
+        'right': '\\]',
+        'display': True,
+    },
+]
 
 
 class LoggingConstants:
@@ -249,10 +256,7 @@ class LoggingConstants:
         '%(asctime)s - %(name)s - %(filename)s - %(funcName)s - %(lineno)d'
         ' - %(log_color)s%(levelname)s%(reset)s: %(message)s'
     )
-    COLOR_SIMPLE_FORMAT = ('%(asctime)s - %(name)s - %(log_color)s%(levelname)s%(reset)s: %(message)s')
+    COLOR_SIMPLE_FORMAT = '%(asctime)s - %(name)s - %(log_color)s%(levelname)s%(reset)s: %(message)s'
     # File output formats (plain)
-    DETAILED_FORMAT = (
-        '%(asctime)s - %(name)s - %(filename)s - %(funcName)s - %(lineno)d'
-        ' - %(levelname)s: %(message)s'
-    )
+    DETAILED_FORMAT = '%(asctime)s - %(name)s - %(filename)s - %(funcName)s - %(lineno)d - %(levelname)s: %(message)s'
     SIMPLE_FORMAT = '%(asctime)s - %(name)s - %(levelname)s: %(message)s'

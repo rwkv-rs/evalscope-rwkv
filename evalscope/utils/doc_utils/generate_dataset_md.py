@@ -26,7 +26,7 @@ from . import (
     load_benchmark_data,
     save_benchmark_data,
 )
-from .readme_generator import _format_sample_count, _format_tags, generate_readme_from_dict
+from .readme_generator import _format_tags, generate_readme_from_dict
 
 if TYPE_CHECKING:
     from evalscope.api.benchmark import BenchmarkMeta, DataAdapter
@@ -39,26 +39,14 @@ if TYPE_CHECKING:
 def get_index_locale(category: str, lang: str) -> Dict[str, str]:
     """Get localized strings for index page."""
     locale = {
-        'title': {
-            'zh': f'{category}评测集',
-            'en': f'{category} Benchmarks'
-        },
+        'title': {'zh': f'{category}评测集', 'en': f'{category} Benchmarks'},
         'intro': {
             'zh': f'以下是支持的{category}评测集列表，点击数据集名称可查看详细信息。',
-            'en': f'Below is the list of supported {category} benchmarks. Click on a benchmark name for details.'
+            'en': f'Below is the list of supported {category} benchmarks. Click on a benchmark name for details.',
         },
-        'name': {
-            'zh': '数据集名称',
-            'en': 'Benchmark Name'
-        },
-        'pretty_name': {
-            'zh': '标准名称',
-            'en': 'Pretty Name'
-        },
-        'tags': {
-            'zh': '任务类别',
-            'en': 'Task Categories'
-        },
+        'name': {'zh': '数据集名称', 'en': 'Benchmark Name'},
+        'pretty_name': {'zh': '标准名称', 'en': 'Pretty Name'},
+        'tags': {'zh': '任务类别', 'en': 'Task Categories'},
     }
     return {k: v[lang] for k, v in locale.items()}
 
@@ -116,13 +104,15 @@ def generate_index_table(
         lines.append(f'| `{name}` | [{pretty_name}]({readme_link}) | {tags} |')
 
     # Add hidden toctree to include all benchmark documents in the directory tree
-    lines.extend([
-        '',
-        ':::{toctree}',
-        ':hidden:',
-        ':maxdepth: 1',
-        '',
-    ])
+    lines.extend(
+        [
+            '',
+            ':::{toctree}',
+            ':hidden:',
+            ':maxdepth: 1',
+            '',
+        ]
+    )
 
     # Add all benchmark files to toctree
     for benchmark in benchmarks:
@@ -218,6 +208,7 @@ def extract_benchmark_meta(meta: 'BenchmarkMeta', adapter_cls: Optional[Type['Da
             'strategy': adapter_cls.strategy_name,
             'max_steps': adapter_cls.max_steps_default,
         }
+    requires_judge = bool(getattr(getattr(adapter_cls, 'scoring_policy', None), 'judge_by_default', False))
     adapter_meta = {
         'pretty_name': getattr(meta, 'pretty_name', None) or meta.name,
         'dataset_id': getattr(meta, 'dataset_id', ''),
@@ -241,6 +232,11 @@ def extract_benchmark_meta(meta: 'BenchmarkMeta', adapter_cls: Optional[Type['Da
         adapter_meta['primary_metric'] = serialized_primary_metric
     if agent_config is not None:
         adapter_meta['agent_config'] = agent_config
+    if requires_judge:
+        adapter_meta['requires_judge'] = True
+    if doc_eval_type := getattr(adapter_cls, 'doc_eval_type', None):
+        adapter_meta['eval_type'] = doc_eval_type
+        adapter_meta['requires_local_dataset'] = getattr(adapter_cls, 'requires_local_dataset', False)
     return adapter_meta
 
 
@@ -336,6 +332,7 @@ def update_benchmark_data(
             return (name, result, None)
         except Exception as e:
             import traceback
+
             error_msg = f'{e}\n{traceback.format_exc()}'
             return (name, None, error_msg)
 
@@ -452,6 +449,7 @@ def _update_single_benchmark(
     except Exception as e:
         print(f'Error updating {name}: {e}')
         import traceback
+
         traceback.print_exc()
         raise
 

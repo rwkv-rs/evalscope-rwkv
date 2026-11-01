@@ -102,6 +102,7 @@ class DeepSWEAdapter(AgentAdapter):
         return download_snapshot(
             data_id_or_path=self.dataset_id,
             data_source=self.dataset_hub,
+            revision=self.dataset_revision,
             force_redownload=self.force_redownload,
             cache_dir=str(cache_dir),
         )
@@ -119,6 +120,28 @@ class DeepSWEAdapter(AgentAdapter):
         output = ModelOutput.from_content(model=model.name, content=trial_uri)
         trace, messages = load_pier_trace(result_dict)
         return InferenceResult(output=output, trace=trace, messages=messages)
+
+    def _agent_credential_env(self, model: Model) -> Dict[str, str]:
+        """Expose the evaluated model's endpoint credentials to the Pier agent.
+
+        The Pier mini-swe-agent runs its own LiteLLM client inside the Docker
+        environment and reads the target endpoint from ``OPENAI_API_KEY`` /
+        ``OPENAI_BASE_URL``. Without this, evaluating an OpenAI-compatible
+        endpoint (``--api-url`` / ``--api-key``) leaves the agent with no
+        credentials. Reuse the credentials already resolved onto the model so
+        the user does not have to repeat them in ``pier_agent_kwargs``.
+        """
+        env: Dict[str, str] = {}
+        api = getattr(model, 'api', None)
+        base_url = getattr(api, 'base_url', None)
+        api_key = getattr(api, 'api_key', None)
+        if api_key:
+            env['OPENAI_API_KEY'] = str(api_key)
+        if base_url:
+            env['OPENAI_BASE_URL'] = str(base_url)
+            # LiteLLM honours OPENAI_API_BASE; set both for compatibility.
+            env['OPENAI_API_BASE'] = str(base_url)
+        return env
 
     def _run_pier_job(self, model: Model, sample: Sample) -> Dict[str, Any]:
         check_import('pier', extra='deep_swe', raise_error=True, feature_name=self.pretty_name)
@@ -139,12 +162,14 @@ class DeepSWEAdapter(AgentAdapter):
             agent_timeout_multiplier=1.0,
             verifier_timeout_multiplier=1.0,
             environment_build_timeout_multiplier=1.0,
-            agents=[AgentConfig(
-                name='mini-swe-agent',
-                model_name=model.name,
-                kwargs=self.pier_agent_kwargs,
-                env={},
-            )],
+            agents=[
+                AgentConfig(
+                    name='mini-swe-agent',
+                    model_name=model.name,
+                    kwargs=self.pier_agent_kwargs,
+                    env=self._agent_credential_env(model),
+                )
+            ],
             environment=EnvironmentConfig(type='docker'),
             verifier=VerifierConfig(env={}),
             tasks=[TaskConfig(path=Path(sample.metadata['task_path']))],
@@ -167,7 +192,7 @@ class DeepSWEAdapter(AgentAdapter):
             raise RuntimeError('Pier DeepSWE job did not return any trial results.')
 
         trial_result = trial_results[0]
-        rewards = ((trial_result.get('verifier_result') or {}).get('rewards') or {})
+        rewards = (trial_result.get('verifier_result') or {}).get('rewards') or {}
         if rewards.get('reward') is not None:
             return
 
@@ -217,6 +242,7 @@ integrates it through Pier and runs each benchmark sample as one Pier Python API
 - Use `pier_agent_kwargs={'model_class': 'litellm'}` for OpenAI-compatible providers that do not support Responses API
 """,
         dataset_id=DEFAULT_MODELSCOPE_DATASET_ID,
+        hf_dataset_id='datacurve/deep-swe',
         eval_split='test',
         prompt_template='{question}',
         metric_list=['acc'],

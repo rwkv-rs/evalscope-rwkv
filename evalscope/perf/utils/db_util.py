@@ -1,9 +1,11 @@
 import base64
 import json
+import math
 import os
 import pickle
 import re
 import sqlite3
+from statistics import median
 from typing import Dict, List, Optional, Tuple
 
 from tabulate import tabulate
@@ -56,7 +58,7 @@ def write_json_file(data, output_path):
 
 def create_result_table(cursor):
     cursor.execute(
-        f'''CREATE TABLE IF NOT EXISTS result(
+        f"""CREATE TABLE IF NOT EXISTS result(
                       {DatabaseColumns.REQUEST} TEXT,
                       {DatabaseColumns.START_TIME} REAL,
                       {DatabaseColumns.INTER_TOKEN_LATENCIES} TEXT,
@@ -71,7 +73,7 @@ def create_result_table(cursor):
                       {DatabaseColumns.TIME_PER_OUTPUT_TOKEN} REAL,
                       {DatabaseColumns.REQUEST_ID} TEXT,
                       {DatabaseColumns.IS_STREAM} INTEGER
-                   )'''
+                   )"""
     )
 
 
@@ -94,8 +96,12 @@ def insert_benchmark_data(cursor: sqlite3.Cursor, benchmark_data: BenchmarkData)
 
     if benchmark_data.success:
         additional_columns = (
-            benchmark_data.query_latency, benchmark_data.first_chunk_latency, benchmark_data.prompt_tokens,
-            benchmark_data.completion_tokens, benchmark_data.max_gpu_memory_cost, benchmark_data.time_per_output_token
+            benchmark_data.query_latency,
+            benchmark_data.first_chunk_latency,
+            benchmark_data.prompt_tokens,
+            benchmark_data.completion_tokens,
+            benchmark_data.max_gpu_memory_cost,
+            benchmark_data.time_per_output_token,
         )
         query = f"""INSERT INTO result(
                       {DatabaseColumns.REQUEST}, {DatabaseColumns.START_TIME}, {DatabaseColumns.INTER_TOKEN_LATENCIES},
@@ -155,15 +161,21 @@ def calculate_percentiles(data: List[float], percentiles: List[int]) -> Dict[int
             if percentile >= 100:
                 value = data[-1] if data else float('nan')
             else:
-                idx = int(n_success_queries * percentile / 100)
-                value = data[idx] if data[idx] is not None else float('nan')
-            results[percentile] = round(value, 2)
+                # Nearest-rank method: the p-th percentile is the value at rank
+                # ceil(p/100 * n) (1-based), i.e. index ceil(p/100 * n) - 1.
+                idx = max(0, math.ceil(n_success_queries * percentile / 100) - 1)
+                value = data[idx]
+            results[percentile] = round(value, 4) if value is not None else float('nan')
         except IndexError:
             results[percentile] = float('nan')
     return results
 
 
-def get_percentile_results(result_db_path: str, api_type: str = None) -> PercentileResult:
+def get_percentile_results(
+    result_db_path: str,
+    api_type: str = None,
+    enable_pd_metrics: bool = False,
+) -> PercentileResult:
     """
     Compute and return quantiles for various metrics from the database results.
 
@@ -171,12 +183,12 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
     :param api_type: The API type (e.g., 'openai', 'openai_embedding', 'openai_rerank').
     :return: :class:`~evalscope.perf.utils.perf_models.PercentileResult` instance.
     """
-    query_sql = f'''SELECT {DatabaseColumns.START_TIME}, {DatabaseColumns.INTER_TOKEN_LATENCIES}, {DatabaseColumns.SUCCESS},
+    query_sql = f"""SELECT {DatabaseColumns.START_TIME}, {DatabaseColumns.INTER_TOKEN_LATENCIES}, {DatabaseColumns.SUCCESS},
                     {DatabaseColumns.COMPLETED_TIME}, {DatabaseColumns.LATENCY}, {DatabaseColumns.FIRST_CHUNK_LATENCY},
                     {DatabaseColumns.PROMPT_TOKENS},
                     {DatabaseColumns.COMPLETION_TOKENS}, {DatabaseColumns.TIME_PER_OUTPUT_TOKEN},
                     {DatabaseColumns.IS_STREAM}
-                    FROM result WHERE {DatabaseColumns.SUCCESS}=1'''  # noqa: E501
+                    FROM result WHERE {DatabaseColumns.SUCCESS}=1"""  # noqa: E501
 
     percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
 
@@ -195,7 +207,7 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
     stream_rows = [r for r in rows if r[col_indices[DatabaseColumns.IS_STREAM]]]
     streaming_rows = stream_rows if stream_rows else rows
 
-    is_embedding_rerank = Metrics.is_embedding_or_rerank(api_type)
+    is_embedding_rerank = Metrics.is_input_only(api_type)
 
     if is_embedding_rerank:
         # For embedding/rerank models, show relevant metrics only
@@ -204,7 +216,9 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
             PercentileMetrics.INPUT_TOKENS: [row[col_indices[DatabaseColumns.PROMPT_TOKENS]] for row in rows],
             PercentileMetrics.INPUT_THROUGHPUT: [
                 (row[col_indices[DatabaseColumns.PROMPT_TOKENS]] / row[col_indices[DatabaseColumns.LATENCY]])
-                if row[col_indices[DatabaseColumns.LATENCY]] > 0 else float('nan') for row in rows
+                if row[col_indices[DatabaseColumns.LATENCY]] > 0
+                else float('nan')
+                for row in rows
             ],
         }
     else:
@@ -212,10 +226,20 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
         # Prepare data for each metric.
         # ITL over all rows: non-stream rows carry empty ITL, so no bucketing needed.
         inter_token_latencies_all = []
+        steady_inter_token_latencies_all = [] if enable_pd_metrics else None
+        pd_handoff_latencies = [] if enable_pd_metrics else None
+        pd_handoff_overheads = [] if enable_pd_metrics else None
         for row in rows:
             try:
                 itl = json.loads(row[col_indices[DatabaseColumns.INTER_TOKEN_LATENCIES]]) or []
                 inter_token_latencies_all.extend(itl)
+                if enable_pd_metrics:
+                    if len(itl) > 1:
+                        steady_inter_token_latencies_all.extend(itl[1:])
+                    if itl:
+                        pd_handoff_latencies.append(itl[0])
+                    if len(itl) > 1:
+                        pd_handoff_overheads.append(max(0.0, itl[0] - median(itl[1:])))
             except (json.JSONDecodeError, TypeError) as e:
                 logger.error(f'Error parsing inter token latencies: {e}')
 
@@ -225,12 +249,18 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
                 row[col_indices[DatabaseColumns.FIRST_CHUNK_LATENCY]] * 1000 for row in streaming_rows
             ],
             PercentileMetrics.ITL: [v * 1000 for v in inter_token_latencies_all],
+            # Streamed replies without a decode phase (one token) have no TPOT; they
+            # are left out like in Decode throughput. Pure non-stream runs keep 0.
             PercentileMetrics.TPOT: [
-                row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]] * 1000 for row in streaming_rows
+                row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]] * 1000
+                if row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]] > 0 or not stream_rows
+                else float('nan')
+                for row in streaming_rows
             ],
             PercentileMetrics.DECODE_THROUGHPUT: [
                 (1.0 / row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]])
-                if row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]] > 0 else float('nan')
+                if row[col_indices[DatabaseColumns.TIME_PER_OUTPUT_TOKEN]] > 0
+                else float('nan')
                 for row in streaming_rows
             ],
             # Generic (all success rows)
@@ -239,13 +269,29 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
             PercentileMetrics.OUTPUT_TOKENS: [row[col_indices[DatabaseColumns.COMPLETION_TOKENS]] for row in rows],
             PercentileMetrics.OUTPUT_THROUGHPUT: [
                 (row[col_indices[DatabaseColumns.COMPLETION_TOKENS]] / row[col_indices[DatabaseColumns.LATENCY]])
-                if row[col_indices[DatabaseColumns.LATENCY]] > 0 else float('nan') for row in rows
+                if row[col_indices[DatabaseColumns.LATENCY]] > 0
+                else float('nan')
+                for row in rows
             ],
-            PercentileMetrics.TOTAL_THROUGHPUT: [(
-                (row[col_indices[DatabaseColumns.PROMPT_TOKENS]] + row[col_indices[DatabaseColumns.COMPLETION_TOKENS]])
-                / row[col_indices[DatabaseColumns.LATENCY]]
-            ) if row[col_indices[DatabaseColumns.LATENCY]] > 0 else float('nan') for row in rows],
+            PercentileMetrics.TOTAL_THROUGHPUT: [
+                (
+                    (
+                        row[col_indices[DatabaseColumns.PROMPT_TOKENS]]
+                        + row[col_indices[DatabaseColumns.COMPLETION_TOKENS]]
+                    )
+                    / row[col_indices[DatabaseColumns.LATENCY]]
+                )
+                if row[col_indices[DatabaseColumns.LATENCY]] > 0
+                else float('nan')
+                for row in rows
+            ],
         }
+        if steady_inter_token_latencies_all:
+            metrics[PercentileMetrics.STEADY_ITL] = [v * 1000 for v in steady_inter_token_latencies_all]
+        if pd_handoff_latencies:
+            metrics[PercentileMetrics.PD_HANDOFF_LATENCY] = [v * 1000 for v in pd_handoff_latencies]
+        if pd_handoff_overheads:
+            metrics[PercentileMetrics.PD_HANDOFF_OVERHEAD] = [v * 1000 for v in pd_handoff_overheads]
 
     # Calculate percentiles for each metric and build transposed dict.
     # Percentile 0 maps to the sorted minimum, surfaced as the 'min' row so
@@ -254,6 +300,9 @@ def get_percentile_results(result_db_path: str, api_type: str = None) -> Percent
     all_percentiles = [0] + percentiles + [100]
     transposed: Dict[str, list] = {PercentileMetrics.PERCENTILES: percentile_labels}
     for metric_name, data in metrics.items():
+        # NaN marks a sample with no value (e.g. Decode (tok/s) for a reply with no decode phase).
+        # Leave it out: sort() can't order NaN, which would scramble every percentile of the column.
+        data = [v for v in data if not (isinstance(v, float) and math.isnan(v))]
         metric_percentiles = calculate_percentiles(data, all_percentiles)
         transposed[metric_name] = [metric_percentiles[p] for p in all_percentiles]
 
@@ -271,7 +320,7 @@ def summary_result(
     write_json_file(args.to_dict(), os.path.join(result_path, 'benchmark_args.json'))
 
     # Build BenchmarkSummary from the legacy create_message dict
-    raw_metrics_dict = metrics.create_message(api_type=args.api)
+    raw_metrics_dict = metrics.create_message(api_type=args.api, enable_pd_metrics=args.enable_pd_metrics)
     summary = BenchmarkSummary.from_dict(raw_metrics_dict)
     write_json_file(summary.to_dict(), os.path.join(result_path, 'benchmark_summary.json'))
 
@@ -279,7 +328,11 @@ def summary_result(
     logger.info('\nBenchmarking summary:\n' + summary.to_table())
 
     # Get percentile results
-    percentile_result = get_percentile_results(result_db_path, api_type=args.api)
+    percentile_result = get_percentile_results(
+        result_db_path,
+        api_type=args.api,
+        enable_pd_metrics=args.enable_pd_metrics,
+    )
     if percentile_result.rows:
         write_json_file(percentile_result.to_list(), os.path.join(result_path, 'benchmark_percentile.json'))
         # Print percentile results in a table (transposed: rows=metrics, cols=percentiles)

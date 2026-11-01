@@ -33,9 +33,11 @@ The BC2GM (BioCreative II Gene Mention) dataset is a widely used corpus for gene
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='bc2gm',
         pretty_name='BC2GM',
         dataset_id='extraordinarylab/bc2gm',
+        hf_dataset_id='extraordinarylab/bc2gm',
         tags=[Tags.KNOWLEDGE, Tags.NER],
         description=DESCRIPTION,
         few_shot_num=5,
@@ -48,7 +50,6 @@ The BC2GM (BioCreative II Gene Mention) dataset is a widely used corpus for gene
     )
 )
 class BC2GMAdapter(NERAdapter):
-
     def __init__(self, **kwargs):
         # Initialize the parent class first
         super().__init__(**kwargs)

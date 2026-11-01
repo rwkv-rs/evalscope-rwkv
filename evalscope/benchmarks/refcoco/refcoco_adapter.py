@@ -6,7 +6,7 @@ from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
 from evalscope.api.dataset import Sample
 from evalscope.api.evaluator import TaskState
 from evalscope.api.messages import ChatMessageUser, Content, ContentImage, ContentText
-from evalscope.api.metric import Score
+from evalscope.api.metric import AggScore, SampleScore, Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
 from evalscope.utils.import_utils import check_import
@@ -18,6 +18,7 @@ logger = get_logger()
 
 class EvalMode:
     """Evaluation modes for RefCOCO benchmark."""
+
     BBOX = 'bbox'  # Image Captioning with BBox visualization
     SEG = 'seg'  # Image Captioning with Segmentation visualization
     BBOX_REC = 'bbox_rec'  # Referring Expression Comprehension (REC)
@@ -67,11 +68,25 @@ RefCOCO is a dataset for training and evaluating models on Referring Expression 
 """,  # noqa: E501
         tags=[Tags.KNOWLEDGE, Tags.MULTI_MODAL, Tags.GROUNDING, Tags.IMAGE_CAPTIONING],
         dataset_id='lmms-lab/RefCOCO',
+        hf_dataset_id='lmms-lab/RefCOCO',
         metric_list=[
-            'IoU', 'ACC@0.1', 'ACC@0.3', 'ACC@0.5', 'ACC@0.7', 'ACC@0.9', 'Center_ACC', 'Bleu_1', 'Bleu_2', 'Bleu_3',
-            'Bleu_4', 'METEOR', 'ROUGE_L', 'CIDEr'
+            'IoU',
+            'ACC@0.1',
+            'ACC@0.3',
+            'ACC@0.5',
+            'ACC@0.7',
+            'ACC@0.9',
+            'Center_ACC',
+            'Bleu_1',
+            'Bleu_2',
+            'Bleu_3',
+            'Bleu_4',
+            'METEOR',
+            'ROUGE_L',
+            'CIDEr',
         ],
         primary_metric='iou',
+        evaluation_version='v1.1',
         subset_list=['test', 'val', 'testA', 'testB'],
         extra_params={
             'eval_mode': {
@@ -81,13 +96,12 @@ RefCOCO is a dataset for training and evaluating models on Referring Expression 
                 'seg: image caption task, visualize the original image with segmentation; '
                 'bbox_rec: grounding task, recognize bounding box coordinates.',
                 'value': EvalMode.BBOX,
-                'choices': [EvalMode.BBOX, EvalMode.SEG, EvalMode.BBOX_REC]
+                'choices': [EvalMode.BBOX, EvalMode.SEG, EvalMode.BBOX_REC],
             }
-        }
+        },
     )
 )
 class RefCOCOAdapter(DefaultDataAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.split_as_subset = True
@@ -140,7 +154,7 @@ class RefCOCOAdapter(DefaultDataAdapter):
             'original_bbox': original_bbox,
             'bbox': bbox_norm,
             'eval_mode': self.eval_mode,
-            'image_size': image_size if self.eval_mode == EvalMode.BBOX_REC else None
+            'image_size': image_size if self.eval_mode == EvalMode.BBOX_REC else None,
         }
 
         if self.eval_mode == EvalMode.BBOX_REC:
@@ -148,8 +162,9 @@ class RefCOCOAdapter(DefaultDataAdapter):
         else:
             return self._create_caption_sample(record, image_base64, metadata)
 
-    def _create_bbox_rec_samples(self, record: Dict, image_base64: str, bbox_norm: List[float],
-                                 metadata: Dict) -> List[Sample]:
+    def _create_bbox_rec_samples(
+        self, record: Dict, image_base64: str, bbox_norm: List[float], metadata: Dict
+    ) -> List[Sample]:
         """Create samples for Bounding Box Recognition (REC) task."""
         answers = record.get('answer', [])
         target = str(bbox_norm)
@@ -220,3 +235,26 @@ class RefCOCOAdapter(DefaultDataAdapter):
         score.main_score_name = doc['eval_mode']
 
         return score
+
+    def aggregate_scores(self, sample_scores: List[SampleScore]) -> List[AggScore]:
+        """Score the captions of the caption modes as one corpus, as lmms-eval's refcoco aggregation does.
+
+        CIDEr takes its IDF from the captions scored together, so a lone caption always gets 0, and BLEU
+        pools n-gram counts over the corpus; neither is the mean of per-sample scores.
+        """
+        if self.eval_mode == EvalMode.BBOX_REC:
+            return super().aggregate_scores(sample_scores)
+        from evalscope.benchmarks.refcoco.evaluation_lib import coco_score_result
+
+        scored = [sample_score for sample_score in sample_scores if sample_score.score.value]
+        if not scored:
+            return []
+        corpus = coco_score_result(
+            [sample_score.score.extracted_prediction or '' for sample_score in scored],
+            [sample_score.sample_metadata['answer'] for sample_score in scored],
+        )
+        ids = [sample_score.sample_id for sample_score in scored]
+        return [
+            AggScore(score=score, metric_name=metric, aggregation='mean', num=len(scored), ids=ids)
+            for metric, score in corpus.items()
+        ]

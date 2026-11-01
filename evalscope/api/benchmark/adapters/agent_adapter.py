@@ -210,6 +210,10 @@ class AgentLoopAdapter(AgentAdapter):
             return ac.mcp_servers or None
         return None
 
+    @staticmethod
+    def _resolve_validate_tool_arguments(ac: Any) -> bool:
+        return isinstance(ac, NativeAgentConfig) and ac.validate_tool_arguments
+
     # ------------------------------------------------------------------
     # Overridden inference hook
     # ------------------------------------------------------------------
@@ -257,6 +261,7 @@ class AgentLoopAdapter(AgentAdapter):
             trace_strategy_name=getattr(strategy, 'name', None),
             trace_env_name=environment.name if environment else None,
             mcp_configs=mcp_configs,
+            validate_tool_arguments=self._resolve_validate_tool_arguments(ac),
         )
 
         finalization_prompt = self.build_max_steps_finalization_message(sample)
@@ -277,6 +282,7 @@ class AgentLoopAdapter(AgentAdapter):
         if result.trace is None:
             return False
         from evalscope.api.agent import EventType
+
         return any(
             event.type == EventType.ERROR and event.payload.get('message') == 'max_steps_exceeded'
             for event in result.trace.events
@@ -310,20 +316,14 @@ class AgentLoopAdapter(AgentAdapter):
             type=EventType.MODEL_GENERATE,
             message_id=final_output.message.id,
             token_usage=usage,
-            payload={
-                'stop_reason': final_output.stop_reason,
-                'phase': 'max_steps_finalization'
-            },
+            payload={'stop_reason': final_output.stop_reason, 'phase': 'max_steps_finalization'},
         )
         if final_output.completion.strip():
             result.trace.add_event(
                 step=step,
                 type=EventType.SUBMIT,
                 message_id=final_output.message.id,
-                payload={
-                    'final_answer': final_output.completion,
-                    'phase': 'max_steps_finalization'
-                },
+                payload={'final_answer': final_output.completion, 'phase': 'max_steps_finalization'},
             )
             if result.trace.total_usage is not None and final_output.usage is not None:
                 result.trace.total_usage += final_output.usage

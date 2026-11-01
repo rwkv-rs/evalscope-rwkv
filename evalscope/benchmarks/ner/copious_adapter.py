@@ -33,9 +33,11 @@ Copious corpus is a gold standard corpus for biodiversity entity recognition, co
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='copious',
         pretty_name='Copious',
         dataset_id='extraordinarylab/copious',
+        hf_dataset_id='extraordinarylab/copious',
         tags=[Tags.KNOWLEDGE, Tags.NER],
         description=DESCRIPTION.strip(),
         few_shot_num=5,
@@ -65,7 +67,7 @@ class CopiousAdapter(NERAdapter):
             'GEOGRAPHICAL_LOCATION': 'geographical_location',
             'HABITAT': 'habitat',
             'PERSON': 'person',
-            'TEMPORAL_EXPRESSION': 'temporal_expression'
+            'TEMPORAL_EXPRESSION': 'temporal_expression',
         }
 
         # Add descriptions for each entity type
@@ -99,8 +101,8 @@ class CopiousAdapter(NERAdapter):
                 'Spans of text referring to points in time. This includes specific dates '
                 '(e.g., "10 June 2013"), years, decades, seasons, and geochronological ages '
                 '(e.g., "late Pleistocene"). It excludes time-of-day information and dates '
-                'within a taxon name\'s authority.'
-            )
+                "within a taxon name's authority."
+            ),
         }
 
         # Setup entity mappings based on the defined entity types

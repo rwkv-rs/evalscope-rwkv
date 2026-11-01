@@ -103,6 +103,7 @@ unit tests instead of a single reference answer.
         paper_url='https://arxiv.org/abs/2502.18443',
         metric_list=['pass_rate'],
         primary_metric='pass_rate',
+        evaluation_version='v1.0',
         eval_split='test',
         subset_list=SUBSET_LIST,
         prompt_template=PROMPT_TEMPLATE,
@@ -129,7 +130,7 @@ class OlmocrBenchAdapter(VisionLanguageAdapter):
             content.append(ContentImage(image=bytes_to_base64(image['bytes'], format='png', add_header=True)))
         return Sample(
             input=[ChatMessageUser(content=content)],
-            target=f"{record['pdf']}#page={record['page']}",
+            target=f'{record["pdf"]}#page={record["page"]}',
             subset_key=record['subset'],
             metadata={
                 'pdf': record['pdf'],
@@ -187,7 +188,12 @@ class OlmocrBenchAdapter(VisionLanguageAdapter):
         return score
 
     def aggregate_scores(self, sample_scores: List[SampleScore]) -> List[AggScore]:
-        """Pooled pass rate over all unit tests in the subset (official per-source metric)."""
+        """Pooled pass rate over all unit tests in the subset (official per-source metric).
+
+        Pooling by unit-test count is a mean weighted by each page's ``tests_total``, hence the
+        ``weighted_mean`` aggregation. ``num`` stays the page count so the subset sample count
+        matches the prediction records rather than the unit-test total.
+        """
         tests_passed = 0
         tests_total = 0
         ids = []
@@ -202,12 +208,9 @@ class OlmocrBenchAdapter(VisionLanguageAdapter):
             AggScore(
                 score=pass_rate,
                 metric_name='pass_rate',
-                aggregation='unit_test_pass_rate',
+                aggregation='weighted_mean',
                 num=len(sample_scores),
                 ids=ids,
-                metadata={
-                    'tests_passed': tests_passed,
-                    'tests_total': tests_total
-                },
+                metadata={'tests_passed': tests_passed, 'tests_total': tests_total},
             )
         ]

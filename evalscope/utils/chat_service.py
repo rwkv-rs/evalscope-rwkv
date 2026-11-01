@@ -93,7 +93,6 @@ class TextCompletionResponse(BaseModel):
 
 
 class ChatService:
-
     def __init__(self, model_path, attn_implementation):
         import torch
         from modelscope import AutoModelForCausalLM, AutoTokenizer
@@ -109,7 +108,9 @@ class ChatService:
         ).eval()
         self.streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True)
         self.model_id = os.path.basename(model_path)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        from evalscope.utils.model_utils import get_device
+
+        self.device = torch.device(get_device())
 
     def count_tokens(self, text: str) -> int:
         # Use the tokenizer to count the number of tokens

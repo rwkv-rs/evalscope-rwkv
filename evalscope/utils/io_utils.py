@@ -9,7 +9,7 @@ import string
 import unicodedata
 from datetime import datetime
 from io import BytesIO
-from typing import IO, Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import IO, Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import filetype
 import jsonlines as jsonl
@@ -106,12 +106,15 @@ class OutputsStructure:
         Returns:
             str: Absolute path to the sub-directory.
         """
-        if self._dirs[attr_name] is None:
-            dir_path = os.path.join(self.outputs_dir, dir_name)
-            if self.is_make:
-                _ensure_dir(dir_path)
-            self._dirs[attr_name] = dir_path
-        return self._dirs[attr_name]  # type: ignore[return-value]
+        subdir = self._dirs.get(attr_name)
+        if subdir is not None:
+            return subdir
+
+        dir_path = os.path.join(self.outputs_dir, dir_name)
+        if self.is_make:
+            _ensure_dir(dir_path)
+        self._dirs[attr_name] = dir_path
+        return dir_path
 
     @property
     def logs_dir(self) -> str:
@@ -147,8 +150,10 @@ class OutputsStructure:
 def undecode_media(
     dataset: 'Dataset',
     media_type: List[Literal['image', 'audio', 'video']],
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None,
+    cache_file_name_factory: Optional[Callable[[], str]] = None,
 ) -> 'Dataset':
+    """Disable media decoding, optionally using caller-owned temporary conversion storage."""
     from datasets.features import Audio, Image, Sequence, Video
 
     if not isinstance(dataset, Dataset):
@@ -180,7 +185,11 @@ def undecode_media(
         return dataset
 
     # if there are updates, do casting
-    dataset = dataset.cast(features, batch_size=batch_size or DATASET_TRANSFORM_BATCH_SIZE)
+    dataset = dataset.cast(
+        features,
+        batch_size=batch_size or DATASET_TRANSFORM_BATCH_SIZE,
+        cache_file_name=cache_file_name_factory() if cache_file_name_factory is not None else None,
+    )
     return dataset
 
 
@@ -198,32 +207,38 @@ def parquet_to_list(parquet_file: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def jsonl_to_list(jsonl_file: str) -> List[Dict[str, Any]]:
+def jsonl_to_list(jsonl_file: str, skip_invalid: bool = False) -> List[Dict[str, Any]]:
     """Read a JSONL file into a list of dicts.
-
-    Attempts to use the ``jsonlines`` library first; falls back to
-    line-by-line ``json.loads`` parsing on any error.
 
     Args:
         jsonl_file (str): Path to the ``.jsonl`` file.
+        skip_invalid (bool): Whether malformed or non-object rows should be
+            logged and skipped. Defaults to ``False`` so dataset inputs do
+            not silently lose records.
 
     Returns:
         List[Dict[str, Any]]: Parsed records.  Returns an empty list and
         logs a warning when the file contains no valid records.
     """
     res_list: List[Dict[str, Any]] = []
-    try:
-        with jsonl.open(jsonl_file, mode='r') as reader:
-            for line in reader.iter(type=dict, allow_none=True, skip_invalid=False):
-                res_list.append(line)
-    except Exception:
-        # Fallback: parse line-by-line with the stdlib json module.
-        res_list = []
-        with open(jsonl_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped:
-                    res_list.append(json.loads(stripped))
+    # `utf-8-sig` reads plain UTF-8 unchanged but also drops the BOM that Windows
+    # tools (Excel, PowerShell 5.1 `Out-File -Encoding utf8`) prepend; without it
+    # the first row's JSON does not parse.
+    with open(jsonl_file, 'r', encoding='utf-8-sig') as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+                if not isinstance(parsed, dict):
+                    raise TypeError(f'Expected a JSON object, got {type(parsed).__name__}')
+            except (json.JSONDecodeError, TypeError) as e:
+                if not skip_invalid:
+                    raise
+                logger.warning(f'Skipping invalid JSONL row {line_number} in {jsonl_file}: {e}')
+                continue
+            res_list.append(parsed)
 
     if not res_list:
         logger.warning(f'No data found in {jsonl_file}.')
@@ -337,6 +352,9 @@ def dump_jsonl_data(
 def jsonl_to_csv(jsonl_file: str, csv_file: str) -> None:
     """Convert a JSONL file to CSV format.
 
+    Columns follow the order in which keys first appear across all records.
+    Missing fields are written as empty cells.
+
     Args:
         jsonl_file (str): Source ``.jsonl`` file path.
         csv_file (str): Destination ``.csv`` file path.  Parent directories
@@ -347,12 +365,12 @@ def jsonl_to_csv(jsonl_file: str, csv_file: str) -> None:
         logger.warning(f'No data found in {jsonl_file}.')
         return
 
+    fieldnames = list(dict.fromkeys(key for item in data for key in item))
     _ensure_dir(os.path.dirname(csv_file))
     with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(data[0].keys())
-        for item in data:
-            writer.writerow(item.values())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(data)
 
 
 def csv_to_list(csv_file: str) -> List[Dict[str, str]]:
@@ -369,7 +387,8 @@ def csv_to_list(csv_file: str) -> List[Dict[str, str]]:
     """
     try:
         res_list: List[Dict[str, str]] = []
-        with open(csv_file, 'r', encoding='utf-8') as f:
+        # Drop a UTF-8 BOM (Excel "CSV UTF-8") so the first header keeps its name.
+        with open(csv_file, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 res_list.append(dict(row))
@@ -392,7 +411,7 @@ def tsv_to_list(tsv_file: str) -> List[Dict[str, str]]:
     """
     try:
         res_list: List[Dict[str, str]] = []
-        with open(tsv_file, 'r', encoding='utf-8') as f:
+        with open(tsv_file, 'r', encoding='utf-8-sig') as f:
             reader = csv.DictReader(f, delimiter='\t')
             for row in reader:
                 res_list.append(dict(row))
@@ -578,7 +597,7 @@ def safe_filename(s: str, max_length: int = 255) -> str:
         name, ext = os.path.splitext(s)
         ext_len = len(ext)
         if ext_len > 0:
-            s = name[:max_length - ext_len] + ext
+            s = name[: max_length - ext_len] + ext
         else:
             s = s[:max_length]
 
@@ -862,8 +881,7 @@ def compress_image_to_limit(
     try:
         img = Image.open(BytesIO(image_bytes))
     except Exception as exc:
-        logger.warning(f'Failed to open image bytes with PIL, sending original image; '
-                       f'may exceed API limit: {exc}')
+        logger.warning(f'Failed to open image bytes with PIL, sending original image; may exceed API limit: {exc}')
         return image_bytes, 'png'
 
     if img.mode not in ('RGB', 'L'):
@@ -893,8 +911,7 @@ def compress_image_to_limit(
         out = _encode_jpeg(img, quality)
 
     if len(out) > max_bytes:
-        logger.warning(f'Image remains above limit after compression: '
-                       f'size={len(out)} bytes (limit={max_bytes}).')
+        logger.warning(f'Image remains above limit after compression: size={len(out)} bytes (limit={max_bytes}).')
     else:
         logger.info(
             f'Compressed image from {len(image_bytes)} to {len(out)} bytes; '

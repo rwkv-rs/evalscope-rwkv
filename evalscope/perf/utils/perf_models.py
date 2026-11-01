@@ -15,7 +15,6 @@ Public classes
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -52,6 +51,7 @@ class BenchmarkSummary(BaseModel):
     request_throughput: float = Field(0.0, alias=Metrics.REQUEST_THROUGHPUT)
     avg_latency: float = Field(0.0, alias=Metrics.AVERAGE_LATENCY)
     avg_input_tokens: float = Field(0.0, alias=Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST)
+    not_applicable_metrics: Optional[List[str]] = Field(None, alias='Not Applicable Metrics')
 
     # --- LLM-specific ---
     output_token_throughput: float = Field(0.0, alias=Metrics.OUTPUT_TOKEN_THROUGHPUT)
@@ -59,6 +59,9 @@ class BenchmarkSummary(BaseModel):
     avg_ttft: float = Field(0.0, alias=Metrics.AVERAGE_TIME_TO_FIRST_TOKEN)
     avg_tpot: float = Field(0.0, alias=Metrics.AVERAGE_TIME_PER_OUTPUT_TOKEN)
     avg_itl: float = Field(0.0, alias=Metrics.AVERAGE_INTER_TOKEN_LATENCY)
+    avg_steady_itl: Optional[float] = Field(None, alias=Metrics.AVERAGE_STEADY_INTER_TOKEN_LATENCY)
+    avg_pd_handoff_latency: Optional[float] = Field(None, alias=Metrics.AVERAGE_PD_HANDOFF_LATENCY)
+    avg_pd_handoff_overhead: Optional[float] = Field(None, alias=Metrics.AVERAGE_PD_HANDOFF_OVERHEAD)
     avg_output_tokens: float = Field(0.0, alias=Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST)
 
     # --- Embedding / Rerank-specific ---
@@ -82,7 +85,7 @@ class BenchmarkSummary(BaseModel):
         'failed_requests',
         'stream_requests',
         'non_stream_requests',
-        mode='before'
+        mode='before',
     )
     @classmethod
     def _round_to_int(cls, v):
@@ -148,18 +151,43 @@ class BenchmarkSummary(BaseModel):
             )
         if self.avg_itl:
             rows.append((Metrics.AVERAGE_INTER_TOKEN_LATENCY, _fmt(Metrics.AVERAGE_INTER_TOKEN_LATENCY, self.avg_itl)))
+        if self.avg_steady_itl is not None:
+            rows.append(
+                (
+                    Metrics.AVERAGE_STEADY_INTER_TOKEN_LATENCY,
+                    _fmt(Metrics.AVERAGE_STEADY_INTER_TOKEN_LATENCY, self.avg_steady_itl),
+                )
+            )
+        if self.avg_pd_handoff_latency is not None:
+            rows.append(
+                (
+                    Metrics.AVERAGE_PD_HANDOFF_LATENCY,
+                    _fmt(Metrics.AVERAGE_PD_HANDOFF_LATENCY, self.avg_pd_handoff_latency),
+                )
+            )
+        if self.avg_pd_handoff_overhead is not None:
+            rows.append(
+                (
+                    Metrics.AVERAGE_PD_HANDOFF_OVERHEAD,
+                    _fmt(Metrics.AVERAGE_PD_HANDOFF_OVERHEAD, self.avg_pd_handoff_overhead),
+                )
+            )
 
         # ── Tokens ──
         rows.append(('── Tokens ──', ''))
-        rows.append((
-            Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST,
-            _fmt(Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST, self.avg_input_tokens)
-        ))
+        rows.append(
+            (
+                Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST,
+                _fmt(Metrics.AVERAGE_INPUT_TOKENS_PER_REQUEST, self.avg_input_tokens),
+            )
+        )
         if self.avg_output_tokens:
-            rows.append((
-                Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST,
-                _fmt(Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST, self.avg_output_tokens)
-            ))
+            rows.append(
+                (
+                    Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST,
+                    _fmt(Metrics.AVERAGE_OUTPUT_TOKENS_PER_REQUEST, self.avg_output_tokens),
+                )
+            )
         if self.output_token_throughput:
             rows.append(
                 (Metrics.OUTPUT_TOKEN_THROUGHPUT, _fmt(Metrics.OUTPUT_TOKEN_THROUGHPUT, self.output_token_throughput))
@@ -175,7 +203,8 @@ class BenchmarkSummary(BaseModel):
 
         # ── Multi-turn (optional) ──
         multiturn_present = any(
-            v is not None for v in (
+            v is not None
+            for v in (
                 self.avg_turns,
                 self.avg_cached_percent,
                 self.avg_first_turn_ttft,
@@ -185,10 +214,12 @@ class BenchmarkSummary(BaseModel):
         if multiturn_present:
             rows.append(('── Multi-turn ──', ''))
             if self.avg_turns is not None:
-                rows.append((
-                    Metrics.AVERAGE_INPUT_TURNS_PER_REQUEST,
-                    _fmt(Metrics.AVERAGE_INPUT_TURNS_PER_REQUEST, self.avg_turns)
-                ))
+                rows.append(
+                    (
+                        Metrics.AVERAGE_INPUT_TURNS_PER_REQUEST,
+                        _fmt(Metrics.AVERAGE_INPUT_TURNS_PER_REQUEST, self.avg_turns),
+                    )
+                )
             if self.avg_cached_percent is not None:
                 rows.append(
                     (Metrics.AVERAGE_CACHED_PERCENT, _fmt(Metrics.AVERAGE_CACHED_PERCENT, self.avg_cached_percent))
@@ -198,24 +229,30 @@ class BenchmarkSummary(BaseModel):
                     (Metrics.AVERAGE_FIRST_TURN_TTFT, _fmt(Metrics.AVERAGE_FIRST_TURN_TTFT, self.avg_first_turn_ttft))
                 )
             if self.avg_subsequent_turn_ttft is not None:
-                rows.append((
-                    Metrics.AVERAGE_SUBSEQUENT_TURN_TTFT,
-                    _fmt(Metrics.AVERAGE_SUBSEQUENT_TURN_TTFT, self.avg_subsequent_turn_ttft)
-                ))
+                rows.append(
+                    (
+                        Metrics.AVERAGE_SUBSEQUENT_TURN_TTFT,
+                        _fmt(Metrics.AVERAGE_SUBSEQUENT_TURN_TTFT, self.avg_subsequent_turn_ttft),
+                    )
+                )
 
         # ── Speculative Decoding (optional) ──
         if self.avg_decoded_tokens_per_iter is not None or self.approx_spec_acceptance_rate is not None:
             rows.append(('── Speculative Decoding ──', ''))
             if self.avg_decoded_tokens_per_iter is not None:
-                rows.append((
-                    Metrics.AVERAGE_DECODED_TOKENS_PER_ITER,
-                    _fmt(Metrics.AVERAGE_DECODED_TOKENS_PER_ITER, self.avg_decoded_tokens_per_iter)
-                ))
+                rows.append(
+                    (
+                        Metrics.AVERAGE_DECODED_TOKENS_PER_ITER,
+                        _fmt(Metrics.AVERAGE_DECODED_TOKENS_PER_ITER, self.avg_decoded_tokens_per_iter),
+                    )
+                )
             if self.approx_spec_acceptance_rate is not None:
-                rows.append((
-                    Metrics.APPROX_SPECULATIVE_ACCEPTANCE_RATE,
-                    _fmt(Metrics.APPROX_SPECULATIVE_ACCEPTANCE_RATE, self.approx_spec_acceptance_rate)
-                ))
+                rows.append(
+                    (
+                        Metrics.APPROX_SPECULATIVE_ACCEPTANCE_RATE,
+                        _fmt(Metrics.APPROX_SPECULATIVE_ACCEPTANCE_RATE, self.approx_spec_acceptance_rate),
+                    )
+                )
 
         raw = tabulate(rows, headers=['Metric', 'Value'], tablefmt='simple_outline', colalign=('left', 'right'))
 
@@ -236,6 +273,9 @@ class PercentileRow(BaseModel):
     latency: Optional[float] = Field(None, alias=PercentileMetrics.LATENCY)
     ttft: Optional[float] = Field(None, alias=PercentileMetrics.TTFT)
     itl: Optional[float] = Field(None, alias=PercentileMetrics.ITL)
+    steady_itl: Optional[float] = Field(None, alias=PercentileMetrics.STEADY_ITL)
+    pd_handoff_latency: Optional[float] = Field(None, alias=PercentileMetrics.PD_HANDOFF_LATENCY)
+    pd_handoff_overhead: Optional[float] = Field(None, alias=PercentileMetrics.PD_HANDOFF_OVERHEAD)
     tpot: Optional[float] = Field(None, alias=PercentileMetrics.TPOT)
     input_tokens: Optional[float] = Field(None, alias=PercentileMetrics.INPUT_TOKENS)
     output_tokens: Optional[float] = Field(None, alias=PercentileMetrics.OUTPUT_TOKENS)
@@ -326,9 +366,7 @@ class PercentileResult(BaseModel):
         """
         # Build alias -> field name mapping once at call time
         alias_map = {
-            field_info.alias: name
-            for name, field_info in PercentileRow.model_fields.items()
-            if field_info.alias
+            field_info.alias: name for name, field_info in PercentileRow.model_fields.items() if field_info.alias
         }
         field_name = alias_map.get(alias)
         if field_name is None:
@@ -374,12 +412,11 @@ class PercentileResult(BaseModel):
         p_labels = col_data.get(PercentileMetrics.PERCENTILES, [])
         rows = [
             [metric]
-            + [format_perf_value(v, metric, include_unit=False) if isinstance(v, (int, float)) else v
-               for v in values]
+            + [format_perf_value(v, metric, include_unit=False) if isinstance(v, (int, float)) else v for v in values]
             for metric, values in col_data.items()
             if metric != PercentileMetrics.PERCENTILES
         ]
-        col_align = ('left', ) + ('right', ) * len(p_labels)
+        col_align = ('left',) + ('right',) * len(p_labels)
         return tabulate(
             rows,
             headers=['Metric'] + p_labels,

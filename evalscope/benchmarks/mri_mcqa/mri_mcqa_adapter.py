@@ -40,6 +40,7 @@ MRI-MCQA is a specialized benchmark composed of multiple-choice questions relate
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MEDICAL],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/mri-mcqa',
+        hf_dataset_id='extraordinarylab/mri-mcqa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split=None,
@@ -48,7 +49,6 @@ MRI-MCQA is a specialized benchmark composed of multiple-choice questions relate
     )
 )
 class MRIMCQAAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
             input=record['question'],

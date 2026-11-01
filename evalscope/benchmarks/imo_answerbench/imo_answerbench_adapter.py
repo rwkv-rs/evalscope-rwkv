@@ -51,25 +51,22 @@ IMO-AnswerBench is a benchmark of 400 challenging problems sourced from the Inte
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='imo_answerbench',
         pretty_name='IMO-AnswerBench',
         dataset_id='evalscope/imo-answerbench',
+        hf_dataset_id='Hwilner/imo-answerbench',
         description=DESCRIPTION.strip(),
         tags=[Tags.MATH, Tags.REASONING],
         subset_list=['Algebra', 'Combinatorics', 'Geometry', 'Number theory'],
         few_shot_num=0,
         train_split=None,
         eval_split='train',  # Dataset only provides 'train' split
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         prompt_template=PROMPT_TEMPLATE,
     )
 )
 class IMOAnswerBenchAdapter(DefaultDataAdapter):
-
     scoring_policy = ScoringPolicy.JUDGE_DEFAULT
 
     def __init__(self, **kwargs):

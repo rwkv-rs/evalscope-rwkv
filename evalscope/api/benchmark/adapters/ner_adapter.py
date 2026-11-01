@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Set, Tuple
 
 from evalscope.api.dataset import Sample
+from evalscope.api.evaluator import TaskState
 from evalscope.api.metric.scorer import AggScore, SampleScore, Score
 from evalscope.utils.import_utils import check_import
 from evalscope.utils.logger import get_logger
@@ -60,9 +61,9 @@ class NERAdapter(DefaultDataAdapter):
         self.entity_list = [f'<{ent.lower()}>' for ent in self.entity_type_map.values()]
 
         # Create description of entities for prompt
-        self.entities_description = ', '.join([
-            f'{self.entity_type_map[tag]} ({self.entity_descriptions[tag]})' for tag in self.entity_type_map
-        ])
+        self.entities_description = ', '.join(
+            [f'{self.entity_type_map[tag]} ({self.entity_descriptions[tag]})' for tag in self.entity_type_map]
+        )
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """
@@ -99,7 +100,7 @@ class NERAdapter(DefaultDataAdapter):
             fewshot=fewshot,
             entities=self.entities_description,
             entity_list=', '.join(self.entity_list),
-            text=sample.input
+            text=sample.input,
         )
 
     def sample_to_fewshot(self, sample: Sample) -> str:
@@ -111,6 +112,10 @@ class NERAdapter(DefaultDataAdapter):
 
         # Format few-shot examples to match the expected response format
         return f'Input:\n{sample.input}\n\nOutput:\n{sample.target}'
+
+    def get_reverse_entity_map(self, task_state: TaskState) -> Dict[str, str]:
+        """Return the mapping from prediction tag names to the entity types of this sample's dataset."""
+        return self.reverse_entity_map
 
     def match_score(self, original_prediction, filtered_prediction, reference, task_state) -> Score:
         """
@@ -137,7 +142,9 @@ class NERAdapter(DefaultDataAdapter):
             cleaned_prediction = clean_prediction(filtered_prediction, self.tag_fix_patterns)
 
             # Convert XML-style prediction back to BIO tags aligned with original tokens
-            pred_bio_tags = xml_to_bio_tags(cleaned_prediction, original_tokens, self.reverse_entity_map)
+            pred_bio_tags = xml_to_bio_tags(
+                cleaned_prediction, original_tokens, self.get_reverse_entity_map(task_state)
+            )
 
             # Use seqeval to calculate metrics
             # Note: seqeval expects lists of lists (one per sequence)
@@ -199,15 +206,26 @@ class NERAdapter(DefaultDataAdapter):
                 metric_name='precision',
                 score=avg_precision,
                 num=num_samples,
-                metadata={'type': 'seqeval-micro-average'}
+                metadata={'type': 'seqeval-micro-average'},
             ),
             AggScore(
-                metric_name='recall', score=avg_recall, num=num_samples, metadata={'type': 'seqeval-micro-average'}
+                metric_name='recall',
+                score=avg_recall,
+                num=num_samples,
+                metadata={'type': 'seqeval-micro-average'},
             ),
-            AggScore(metric_name='f1', score=avg_f1, num=num_samples, metadata={'type': 'seqeval-micro-average'}),
             AggScore(
-                metric_name='accuracy', score=avg_accuracy, num=num_samples, metadata={'type': 'seqeval-accuracy'}
-            )
+                metric_name='f1',
+                score=avg_f1,
+                num=num_samples,
+                metadata={'type': 'seqeval-micro-average'},
+            ),
+            AggScore(
+                metric_name='accuracy',
+                score=avg_accuracy,
+                num=num_samples,
+                metadata={'type': 'seqeval-accuracy'},
+            ),
         ]
 
         return agg_scores

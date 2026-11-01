@@ -2,7 +2,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from openai import APIStatusError, BadRequestError, PermissionDeniedError, UnprocessableEntityError
+from openai import APIStatusError
 from openai._types import NOT_GIVEN
 
 from evalscope.api.messages import ChatMessage
@@ -13,8 +13,8 @@ from evalscope.utils import get_logger
 from evalscope.utils.argument_utils import get_supported_params
 from evalscope.utils.function_utils import async_retry_call, retry_call
 
-from .openai_compatible import OpenAICompatibleAPI
-from .utils.openai import openai_handle_bad_request
+from .openai_compatible import NON_RETRYABLE_OPENAI_ERRORS, OpenAICompatibleAPI
+from .utils.openai import EmptyCompletionError, openai_handle_bad_request
 from .utils.openai_responses import (
     async_collect_response_stream,
     chat_choices_from_openai_response,
@@ -67,6 +67,27 @@ class OpenAIResponsesAPI(OpenAICompatibleAPI):
                 'Please upgrade to openai>=1.56.0.'
             )
 
+    @staticmethod
+    def _raise_if_failed(response: Any) -> None:
+        """Reject a Response whose terminal status is ``failed``.
+
+        Both the streaming and non-streaming ``responses.create`` paths can hand back a
+        ``Response`` with ``status == 'failed'`` (and an ``error`` describing why) after
+        HTTP 200. Downstream code otherwise reads it as an empty assistant reply, so a
+        failed request is scored as a blank answer. Mirror the #1918 OpenAI/LiteLLM fix
+        by raising ``EmptyCompletionError`` so the sample is recorded as an error and the
+        request is retried through the same path. ``cancelled`` is left untouched (it only
+        surfaces in background mode).
+        """
+        if getattr(response, 'status', None) != 'failed':
+            return
+        error = getattr(response, 'error', None)
+        if error is not None:
+            detail = f'{getattr(error, "code", None)}: {getattr(error, "message", None)}'
+        else:
+            detail = 'no error detail'
+        raise EmptyCompletionError(f'Responses API returned status=failed ({detail})')
+
     def generate(
         self,
         input: List[ChatMessage],
@@ -74,25 +95,33 @@ class OpenAIResponsesAPI(OpenAICompatibleAPI):
         tool_choice: ToolChoice,
         config: GenerateConfig,
     ) -> ModelOutput:
+        """Generate a response, retrying the entire request if its stream is interrupted."""
         request, tools, config = self._build_request(input, tools, tool_choice, config)
 
         try:
             t_start = time.monotonic()
             ttft: Optional[float] = None
 
-            response = retry_call(
-                self.client.responses.create,
+            def _create_and_collect() -> Tuple[Response, Optional[float]]:
+                raw_response = self.client.responses.create(**request)
+                if self._is_response_object(raw_response):
+                    response, stream_ttft = raw_response, None
+                else:
+                    response, stream_ttft = collect_response_stream(raw_response, request_start=t_start)
+                self._raise_if_failed(response)
+                return response, stream_ttft
+
+            response, ttft = retry_call(
+                _create_and_collect,
                 retries=config.retries,
                 sleep_interval=config.retry_interval,
-                **request,
+                no_retry_exceptions=NON_RETRYABLE_OPENAI_ERRORS,
             )
-            if not self._is_response_object(response):
-                response, ttft = collect_response_stream(response, request_start=t_start)
 
             total_time = time.monotonic() - t_start
             return self._build_output(response, tools, total_time, ttft)
 
-        except (BadRequestError, UnprocessableEntityError, PermissionDeniedError) as ex:
+        except NON_RETRYABLE_OPENAI_ERRORS as ex:
             return self.handle_bad_request(ex)
         except ValueError as ex:
             logger.error(f'Model [{self.model_name}] returned an invalid response: {ex}')
@@ -105,25 +134,33 @@ class OpenAIResponsesAPI(OpenAICompatibleAPI):
         tool_choice: ToolChoice,
         config: GenerateConfig,
     ) -> ModelOutput:
+        """Generate asynchronously with stream consumption inside the retry boundary."""
         request, tools, config = self._build_request(input, tools, tool_choice, config)
 
         try:
             t_start = time.monotonic()
             ttft: Optional[float] = None
 
-            response = await async_retry_call(
-                self.async_client.responses.create,
+            async def _create_and_collect() -> Tuple[Response, Optional[float]]:
+                raw_response = await self.async_client.responses.create(**request)
+                if self._is_response_object(raw_response):
+                    response, stream_ttft = raw_response, None
+                else:
+                    response, stream_ttft = await async_collect_response_stream(raw_response, request_start=t_start)
+                self._raise_if_failed(response)
+                return response, stream_ttft
+
+            response, ttft = await async_retry_call(
+                _create_and_collect,
                 retries=config.retries,
                 sleep_interval=config.retry_interval,
-                **request,
+                no_retry_exceptions=NON_RETRYABLE_OPENAI_ERRORS,
             )
-            if not self._is_response_object(response):
-                response, ttft = await async_collect_response_stream(response, request_start=t_start)
 
             total_time = time.monotonic() - t_start
             return self._build_output(response, tools, total_time, ttft)
 
-        except (BadRequestError, UnprocessableEntityError, PermissionDeniedError) as ex:
+        except NON_RETRYABLE_OPENAI_ERRORS as ex:
             return self.handle_bad_request(ex)
         except ValueError as ex:
             logger.error(f'Model [{self.model_name}] returned an invalid response: {ex}')

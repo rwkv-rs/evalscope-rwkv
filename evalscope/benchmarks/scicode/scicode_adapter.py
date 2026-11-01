@@ -1,11 +1,12 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 # flake8: noqa: E501
 
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, cast
 
 from evalscope.api.benchmark import BenchmarkMeta, MultiTurnAdapter
-from evalscope.api.dataset import Sample
+from evalscope.api.dataset import DatasetHub, Sample
 from evalscope.api.evaluator import TaskState
 from evalscope.api.messages.chat_message import ChatMessage, ChatMessageSystem, ChatMessageUser
 from evalscope.api.metric import AggScore, SampleScore, Score
@@ -13,7 +14,6 @@ from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
-from evalscope.utils.download_utils import download_url
 from evalscope.utils.logger import get_logger
 
 from .prompt_templates import (
@@ -65,22 +65,20 @@ SciCode is a challenging benchmark designed to evaluate language model capabilit
         metric_list=['main_problem_pass_rate', 'subproblem_pass_rate'],
         primary_metric='main_problem_pass_rate',
         eval_split='test',
+        evaluation_version='v1.1',
         review_timeout=300,
         prompt_template=INITIAL_PROMPT,
         extra_params={
             'provide_background': {
                 'type': 'bool',
                 'value': False,
-                'description': 'Include scientific background information written by scientists for the problem in the model\'s prompt.'
+                'description': "Include scientific background information written by scientists for the problem in the model's prompt.",
             }
         },
         sandbox_config={
             'image': 'scicode-benchmark:latest',
-            'tools_config': {
-                'shell_executor': {},
-                'python_executor': {}
-            }
-        }
+            'tools_config': {'shell_executor': {}, 'python_executor': {}},
+        },
     )
 )
 class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
@@ -106,8 +104,15 @@ class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
         Download the test data if it does not exist.
         """
         test_data_path = self.docker_path / 'test_data.h5'
-        data_url = 'https://modelscope.cn/datasets/evalscope/SciCode/resolve/master/test_data.h5'
-        download_url(data_url, str(test_data_path))
+        source_path = DatasetHub(
+            data_id_or_path=self.dataset_id,
+            data_source=self.dataset_hub,
+            revision=self.dataset_revision,
+            force_redownload=self.force_redownload,
+            cache_dir=self.dataset_dir,
+        ).download_file('test_data.h5')
+        if Path(source_path).resolve() != test_data_path.resolve():
+            shutil.copyfile(source_path, test_data_path)
         return super().load()
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
@@ -222,19 +227,12 @@ class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
 
             return Score(
                 value={subproblem['step_number']: 1.0 if result['status'] == 'success' else 0.0},
-                metadata={
-                    'executed_code': code,
-                    'execution_result': result,
-                    'explanation': explanation
-                },
+                metadata={'executed_code': code, 'execution_result': result, 'explanation': explanation},
             )
         except Exception as e:
             return Score(
                 value={subproblem['step_number']: 0.0},
-                metadata={
-                    'executed_code': code,
-                    'explanation': f'An error occurred during code execution: {e}'
-                },
+                metadata={'executed_code': code, 'explanation': f'An error occurred during code execution: {e}'},
             )
 
     def _compose_code(self, subproblem: Dict[str, Any], state: TaskState) -> str:
@@ -258,7 +256,7 @@ class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
         code_sections.append(state.metadata['required_dependencies'])
 
         code_sections.append('from test_util import are_dicts_close, cmp_tuple_or_list')
-        code_sections += get_generated_code(state)[:subproblem_str_to_int(subproblem_no)]
+        code_sections += get_generated_code(state)[: subproblem_str_to_int(subproblem_no)]
 
         # Collect test cases and data.
         code_sections.append('# Test cases:')
@@ -272,8 +270,9 @@ class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
         # Compose code sections to a single string.
         code = '\n'.join(code_sections)
         # Remove unused imports to avoid issues during execution.
-        code = code.replace('from scicode.compare.cmp import cmp_tuple_or_list',
-                            '').replace('from scicode.compare.cmp import are_dicts_close', '')
+        code = code.replace('from scicode.compare.cmp import cmp_tuple_or_list', '').replace(
+            'from scicode.compare.cmp import are_dicts_close', ''
+        )
         return code
 
     def _format_explanation(self, subproblem: Dict[str, Any], code: str, result: Dict) -> str:
@@ -281,9 +280,9 @@ class SciCodeAdapter(CodeExecutionSandboxMixin, MultiTurnAdapter):
         subproblem_no = subproblem['step_number']
         explanation = ''
         if result['status'] == 'success':
-            explanation += (f'All test cases passed for subproblem {subproblem_no}.\n')
+            explanation += f'All test cases passed for subproblem {subproblem_no}.\n'
         else:
             explanation += 'Code did not pass all test cases.\n'
             if result.get('stderr'):
-                explanation += f"Error details:\n```python\n{result['stderr']}\n```\n"
+                explanation += f'Error details:\n```python\n{result["stderr"]}\n```\n'
         return explanation

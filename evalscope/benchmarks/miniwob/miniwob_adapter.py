@@ -39,7 +39,7 @@ scrolling and dragging items.
 - Set `repeats=5` for the five-episode schedule.
 - Each episode allows up to 10 model/tool turns by default.
 - The model must support image input and function calling.
-- See the [MiniWoB usage guide](../third_party/miniwob.html) for installation and examples.
+- See the [MiniWoB usage guide](https://evalscope.readthedocs.io/en/latest/third_party/miniwob.html) for installation and examples.
 """
 
 
@@ -84,10 +84,12 @@ class MiniWobAdapter(BrowserGymAdapter):
         for sample in dataset:
             repeat = sample.id % self.repeats
             episode_seeds = sample.metadata.pop('_episode_seeds')
-            sample.metadata.update({
-                'seed': episode_seeds[repeat],
-                'repeat': repeat,
-            })
+            sample.metadata.update(
+                {
+                    'seed': episode_seeds[repeat],
+                    'repeat': repeat,
+                }
+            )
         return DatasetDict({'default': dataset}), None
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:

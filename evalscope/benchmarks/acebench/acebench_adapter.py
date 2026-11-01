@@ -200,10 +200,7 @@ class AceBenchAdapter(AgentAdapter):
                 ChatMessageSystem(content=system_prompt),
                 ChatMessageUser(content=user_prompt),
             ],
-            target=json.dumps({
-                'ground_truth': ground_truth,
-                'mile_stone': milestones
-            }, ensure_ascii=False),
+            target=json.dumps({'ground_truth': ground_truth, 'mile_stone': milestones}, ensure_ascii=False),
             subset_key=test_category,
             metadata={
                 'id': record_id,
@@ -392,9 +389,7 @@ class AceBenchAdapter(AgentAdapter):
                 continue
 
             subset_dict: Dict[str, Subset] = {
-                subset.name: subset
-                for category in metric.categories
-                for subset in category.subsets
+                subset.name: subset for category in metric.categories for subset in category.subsets
             }
 
             group_subsets = {}
@@ -405,6 +400,8 @@ class AceBenchAdapter(AgentAdapter):
             reported = [subset for subset in group_subsets.values() if subset.num > 0]
             if overall is not None:
                 reported.append(overall)
+            for subset in reported:
+                subset.is_aggregate = True
             if reported:
                 metric.categories.append(Category(name='-', subsets=reported))
 

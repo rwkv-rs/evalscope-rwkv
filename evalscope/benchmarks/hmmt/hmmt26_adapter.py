@@ -21,9 +21,11 @@ Please reason step by step, and put your final answer within \boxed{{}}.
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='hmmt26',
         pretty_name='HMMT26',
         dataset_id='evalscope/hmmt_feb_2026',
+        hf_dataset_id='MathArena/hmmt_feb_2026',
         description="""\
 ## Overview
 
@@ -56,16 +58,11 @@ HMMT February 2026 is a challenging evaluation benchmark derived from the Harvar
         few_shot_num=0,
         train_split=None,
         eval_split='train',  # Dataset only provides 'train' split
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         prompt_template=PROMPT_TEMPLATE,
     )
 )
 class HMMT26Adapter(DefaultDataAdapter):
-
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         problem = str(record.get('problem', '')).strip()
         target = str(record.get('answer', '')).strip()

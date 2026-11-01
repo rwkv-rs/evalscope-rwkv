@@ -7,6 +7,7 @@ import { buildStepGroups } from '@/domain/trace/stepGroups'
 import { EvalResultPanel } from './EvalResultPanel'
 import { JudgeReviewPanel } from './JudgeReviewPanel'
 import { selectJudgeReview, scoreWithoutJudgeAttempts } from '@/domain/chat/judgeReview'
+import DecisionPanel from './DecisionPanel'
 
 type ChatPresentation = 'traced' | 'structured' | 'legacy'
 
@@ -99,11 +100,13 @@ export default function ChatView({ prediction, threshold = 0.99, highlightMsgId 
 
       <div className="border-t border-[var(--border)]" />
 
+      <DecisionPanel metadata={prediction.Score.metadata} />
+
       <EvalResultPanel
         pred={prediction.Pred}
         gold={prediction.Gold}
         nScore={prediction.NScore}
-        status={prediction.Status}
+        status={prediction.Status ?? undefined}
         score={scoreForDetail}
         metadata={prediction.Metadata}
         threshold={threshold}

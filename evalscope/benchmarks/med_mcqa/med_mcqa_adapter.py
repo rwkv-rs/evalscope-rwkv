@@ -40,6 +40,7 @@ MedMCQA is a large-scale multiple-choice question answering dataset designed to 
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/medmcqa',
+        hf_dataset_id='extraordinarylab/medmcqa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split='train',
@@ -48,7 +49,6 @@ MedMCQA is a large-scale multiple-choice question answering dataset designed to 
     )
 )
 class MedMCQAAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
             input=record['question'],

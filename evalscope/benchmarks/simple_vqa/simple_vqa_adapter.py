@@ -109,6 +109,7 @@ C: NOT_ATTEMPTED
         name='simple_vqa',
         pretty_name='SimpleVQA',
         dataset_id='m-a-p/SimpleVQA',
+        hf_dataset_id='m-a-p/SimpleVQA',
         tags=[Tags.REASONING, Tags.MULTI_MODAL, Tags.QA],
         description="""
 ## Overview
@@ -144,7 +145,6 @@ SimpleVQA is the first comprehensive multimodal benchmark to evaluate the factua
     )
 )
 class SimpleVQAAdapter(VisionLanguageAdapter):
-
     scoring_policy = ScoringPolicy.JUDGE_ONLY
 
     def __init__(self, **kwargs):
@@ -170,17 +170,20 @@ class SimpleVQAAdapter(VisionLanguageAdapter):
                 'source': record['source'],
                 'atomic_question': record['atomic_question'],
                 'atomic_fact': record['atomic_fact'],
-            }
+            },
         )
 
     def judge_definition(self, context: JudgeContext) -> JudgeDefinition:
 
         def request(case, placement, completed_cases, judge_context) -> JudgeRequest:
-            prompt = GRADER_TEMPLATE.format(
-                question=judge_context.task_state.input_text,
-                target=judge_context.reference,
-                predicted_answer=judge_context.filtered_prediction,
-            ) + case.output_contract.instruction()
+            prompt = (
+                GRADER_TEMPLATE.format(
+                    question=judge_context.task_state.input_text,
+                    target=judge_context.reference,
+                    predicted_answer=judge_context.filtered_prediction,
+                )
+                + case.output_contract.instruction()
+            )
             return JudgeRequest(messages=[ChatMessageUser(content=prompt)])
 
         def reduce(case_verdicts, judge_context) -> ReducedVerdict:
@@ -197,5 +200,5 @@ class SimpleVQAAdapter(VisionLanguageAdapter):
             cases=[JudgeCase(case_id='grade', output_contract=GRADE_CONTRACT)],
             request=request,
             reduce=reduce,
-            main_score_name='is_correct'
+            main_score_name='is_correct',
         )

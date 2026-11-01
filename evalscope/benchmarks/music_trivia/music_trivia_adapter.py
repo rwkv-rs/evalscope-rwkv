@@ -40,6 +40,7 @@ MusicTrivia is a curated multiple-choice benchmark for evaluating AI models on m
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/music-trivia',
+        hf_dataset_id='extraordinarylab/music-trivia',
         metric_list=['acc'],
         few_shot_num=0,
         train_split=None,
@@ -48,7 +49,6 @@ MusicTrivia is a curated multiple-choice benchmark for evaluating AI models on m
     )
 )
 class MusicTriviaAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
             input=record['question'],

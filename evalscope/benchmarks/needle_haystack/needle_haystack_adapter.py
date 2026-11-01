@@ -1,6 +1,7 @@
 import os
+from collections import defaultdict
 from itertools import product
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Tuple, Union
 
 from pydantic import BaseModel, Field
 from tqdm import tqdm
@@ -10,7 +11,7 @@ from evalscope.api.dataset import DatasetDict, Sample, build_dataset_from_record
 from evalscope.api.evaluator import TaskState
 from evalscope.api.judge import JudgeCase, JudgeContext, JudgeDefinition, JudgeRequest, OutputContract, ReducedVerdict
 from evalscope.api.messages import ChatMessageSystem, ChatMessageUser
-from evalscope.api.metric import Score
+from evalscope.api.metric import AggScore, MetricSelector, SampleScore, Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import ScoringPolicy, Tags
 from evalscope.utils.import_utils import check_import
@@ -78,6 +79,8 @@ Needle in a Haystack is a benchmark focused on evaluating information retrieval 
 """,  # noqa: E501
         dataset_id='AI-ModelScope/Needle-in-a-Haystack-Corpus',
         metric_list=['acc'],
+        primary_metric=MetricSelector(name='accuracy', aggregation='mean', dimensions={'scope': 'overall'}),
+        evaluation_version='v1.2',
         subset_list=['english', 'chinese'],
         eval_split='test',
         system_prompt='You are a helpful AI bot that answers questions for a user. Keep your response short and direct',
@@ -86,60 +89,59 @@ Needle in a Haystack is a benchmark focused on evaluating information retrieval 
             'retrieval_question': {
                 'type': 'str',
                 'description': 'Question used for retrieval evaluation.',
-                'value': 'What is the best thing to do in San Francisco?'
+                'value': 'What is the best thing to do in San Francisco?',
             },
             'needles': {
                 'type': 'list[str]',
                 'description': 'List of factual needle strings inserted into the context.',
                 'value': [
                     '\nThe best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n'
-                ]
+                ],
             },
             'context_lengths_min': {
                 'type': 'int',
                 'description': 'Minimum context length (tokens) to generate synthetic samples.',
-                'value': 1000
+                'value': 1000,
             },
             'context_lengths_max': {
                 'type': 'int',
                 'description': 'Maximum context length (tokens) to generate synthetic samples.',
-                'value': 32000
+                'value': 32000,
             },
             'context_lengths_num_intervals': {
                 'type': 'int',
                 'description': 'Number of intervals between min and max context lengths.',
-                'value': 10
+                'value': 10,
             },
             'document_depth_percent_min': {
                 'type': 'int',
                 'description': 'Minimum insertion depth percentage for needles.',
-                'value': 0
+                'value': 0,
             },
             'document_depth_percent_max': {
                 'type': 'int',
                 'description': 'Maximum insertion depth percentage for needles.',
-                'value': 100
+                'value': 100,
             },
             'document_depth_percent_intervals': {
                 'type': 'int',
                 'description': 'Number of intervals between min and max depth percentages.',
-                'value': 10
+                'value': 10,
             },
             'tokenizer_path': {
                 'type': 'str',
                 'description': 'Tokenizer checkpoint path used for tokenization.',
-                'value': 'Qwen/Qwen3-0.6B'
+                'value': 'Qwen/Qwen3-0.6B',
             },
             'show_score': {
                 'type': 'bool',
                 'description': 'Render numerical scores on heatmap output images.',
-                'value': False
-            }
-        }
+                'value': False,
+            },
+        },
     )
 )
 class NeedleHaystackAdapter(DefaultDataAdapter):
-
     scoring_policy = ScoringPolicy.JUDGE_DEFAULT
 
     def __init__(self, **kwargs):
@@ -148,7 +150,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
             module_name=['matplotlib', 'seaborn'],
             extra='needle_haystack',
             raise_error=True,
-            feature_name=self.pretty_name
+            feature_name=self.pretty_name,
         )
 
         # set extra params
@@ -157,7 +159,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
         )
         self.needles = self.extra_params.get(
             'needles',
-            ['\nThe best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n']
+            ['\nThe best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n'],
         )
         self.context_lengths_min = self.extra_params.get('context_lengths_min', 1000)
         self.context_lengths_max = self.extra_params.get('context_lengths_max', 32000)
@@ -169,7 +171,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
         self.show_score = self.extra_params.get('show_score', False)
 
     def _init_length(self):
-        """ Initialize context lengths and document depth percentages based on the provided parameters."""
+        """Initialize context lengths and document depth percentages based on the provided parameters."""
         import numpy as np
 
         self.context_lengths = np.round(
@@ -177,7 +179,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
                 self.context_lengths_min,
                 self.context_lengths_max,
                 num=self.context_lengths_num_intervals,
-                endpoint=True
+                endpoint=True,
             )
         ).astype(int)
 
@@ -186,13 +188,14 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
                 self.document_depth_percent_min,
                 self.document_depth_percent_max,
                 num=self.document_depth_percent_intervals,
-                endpoint=True
+                endpoint=True,
             )
         ).astype(int)
 
     def _init_tokenizer(self):
-        """ Initialize the tokenizer based on the provided tokenizer path."""
+        """Initialize the tokenizer based on the provided tokenizer path."""
         from modelscope import AutoTokenizer
+
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
 
     def load(self):
@@ -222,7 +225,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
                 tokens_context = self._get_context_tokens(text)
                 for context_length, depth_percent in tqdm(
                     product(self.context_lengths, self.document_depth_percents),
-                    desc=f'Generating {subset_name} samples'
+                    desc=f'Generating {subset_name} samples',
                 ):
                     context = self._insert_needles(tokens_context, depth_percent, context_length)
                     record = {
@@ -260,7 +263,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
                 'context': record['context'],
                 'context_length': record['context_length'],
                 'depth_percent': record['depth_percent'],
-            }
+            },
         )
 
     def format_prompt_template(self, sample):
@@ -321,7 +324,7 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
 
         # Ensure context length accounts for needles
         if len(tokens_context) + total_needles_length > context_length:
-            tokens_context = tokens_context[:context_length - total_needles_length]
+            tokens_context = tokens_context[: context_length - total_needles_length]
 
         # To evenly distribute the needles, we calculate the intervals they need to be inserted.
         depth_percent_interval = (100 - depth_percent) / len(self.needles)
@@ -331,7 +334,6 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
 
         # Insert needles at calculated points
         for needle in self.needles:
-
             tokens_needle = self.tokenizer.encode(needle)
 
             if depth_percent == 100:
@@ -386,73 +388,90 @@ class NeedleHaystackAdapter(DefaultDataAdapter):
             prediction=original_prediction,
         )
 
-        # Get metadata from task state
-        context_length = task_state.metadata.get('context_length', 0)
-        depth_percent = task_state.metadata.get('depth_percent', 0)
-
         norm_gold = normalize_answer(reference)
         norm_pred = normalize_answer(filtered_prediction)
         accuracy = exact_match(gold=norm_gold, pred=norm_pred)
 
-        metric_name = f'Context#{context_length} Depth#{depth_percent}'
-        score.value = {metric_name: accuracy}
-        score.main_score_name = metric_name
+        score.value = {'acc': accuracy}
+        score.main_score_name = 'acc'
 
         return score
 
     def judge_definition(self, context: JudgeContext) -> JudgeDefinition:
-        metric_name = self._metric_name(context.task_state)
-
         def request(case, placement, completed_cases, judge_context) -> JudgeRequest:
             from .utils import GENERAL_ORM_PROMPT, ORM_USER_TEMPLATE
-            prompt = ORM_USER_TEMPLATE.format(
-                question=judge_context.task_state.input_text,
-                gold=judge_context.reference,
-                pred=judge_context.filtered_prediction,
-            ) + case.output_contract.instruction()
+
+            prompt = (
+                ORM_USER_TEMPLATE.format(
+                    # Like the official evaluator, ask only the retrieval question, not the haystack prompt.
+                    question=self.retrieval_question,
+                    gold=judge_context.reference,
+                    pred=judge_context.filtered_prediction,
+                )
+                + case.output_contract.instruction()
+            )
             return JudgeRequest(
-                messages=[ChatMessageSystem(content=GENERAL_ORM_PROMPT),
-                          ChatMessageUser(content=prompt)]
+                messages=[ChatMessageSystem(content=GENERAL_ORM_PROMPT), ChatMessageUser(content=prompt)]
             )
 
         def reduce(case_verdicts, judge_context) -> ReducedVerdict:
-            return ReducedVerdict(value={metric_name: case_verdicts[0].value.verdict / 10.0})
+            return ReducedVerdict(value={'acc': case_verdicts[0].value.verdict / 10.0})
 
         return JudgeDefinition.workflow(
             cases=[JudgeCase(case_id='score', output_contract=SCORE_CONTRACT)],
             request=request,
             reduce=reduce,
-            main_score_name=metric_name
+            main_score_name='acc',
         )
 
-    @staticmethod
-    def _metric_name(task_state: TaskState) -> str:
-        metadata = task_state.metadata or {}
-        return f"Context#{metadata.get('context_length', 0)} Depth#{metadata.get('depth_percent', 0)}"
+    def aggregate_scores(self, sample_scores: List[SampleScore]) -> List[AggScore]:
+        """Aggregate accuracy over all samples and for each context length and needle depth.
+
+        The overall aggregate is the primary metric. Each (context length, depth) cell keeps both
+        values as identity dimensions rather than in the metric name, and the heatmap reads them
+        from there. Samples whose score was excluded carry no value and are left out of every cell.
+        """
+        aggregate_scores = super().aggregate_scores(sample_scores)
+        for aggregate_score in aggregate_scores:
+            aggregate_score.dimensions = {**aggregate_score.dimensions, 'scope': 'overall'}
+
+        cells: Dict[Tuple[Any, Any], List[SampleScore]] = defaultdict(list)
+        for sample_score in sample_scores:
+            metadata = sample_score.sample_metadata or {}
+            if 'context_length' in metadata and 'depth_percent' in metadata:
+                cells[(metadata['context_length'], metadata['depth_percent'])].append(sample_score)
+
+        for (context_length, depth_percent), cell_scores in sorted(cells.items()):
+            for aggregate_score in super().aggregate_scores(cell_scores):
+                aggregate_score.dimensions = {
+                    **aggregate_score.dimensions,
+                    'context_length': context_length,
+                    'depth_percent': depth_percent,
+                }
+                aggregate_scores.append(aggregate_score)
+        return aggregate_scores
 
     def _on_generate_report_end(self, report: 'Report', output_dir: str, **kwargs):
         try:
             import os
 
-            from .utils import draw_score_chat
+            from .utils import collect_cell_scores, draw_score_chat
 
             report_path = output_dir
-            data_frame = report.to_dataframe()
-            # split `Metric` to `Context` and `Depth`
-            data_frame[['Context', 'Depth']] = data_frame['Metric'].str.split(' ', n=1, expand=True)
-            data_frame['Depth'] = data_frame['Depth'].str.replace('Depth#', '').astype(float)
-            data_frame['Context'] = data_frame['Context'].str.replace('Context#', '').astype(int)
+            # one row per subset and (context length, depth) cell, read from the metric dimensions
+            data_frame = collect_cell_scores(report)
             # split by `Subset` to multi sub data frame
             for subset in data_frame['Subset'].unique():
                 sub_df = data_frame[data_frame['Subset'] == subset]
                 # draw charts for each subset
-                pivot_table = sub_df.pivot_table(values='Score', index=['Depth', 'Context'],
-                                                 aggfunc='mean').reset_index()
+                pivot_table = sub_df.pivot_table(
+                    values='Score', index=['Depth', 'Context'], aggfunc='mean'
+                ).reset_index()
                 pivot_table = pivot_table.pivot(index='Depth', columns='Context', values='Score')
                 draw_score_chat(
                     pivot_table,
                     outpath=os.path.join(report_path, f'needle_haystack_heatmap_{subset}.png'),
-                    show_score=self.show_score
+                    show_score=self.show_score,
                 )
 
         except Exception as e:

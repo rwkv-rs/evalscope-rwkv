@@ -22,6 +22,7 @@ MULT_CHOICE_PROMPT = MultipleChoiceTemplate.SINGLE_ANSWER_COT
         name='a_okvqa',
         pretty_name='A-OKVQA',
         dataset_id='HuggingFaceM4/A-OKVQA',
+        hf_dataset_id='HuggingFaceM4/A-OKVQA',
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.MULTI_MODAL],
         description="""
 ## Overview
@@ -58,7 +59,6 @@ A-OKVQA (Augmented OK-VQA) is a benchmark designed to evaluate commonsense reaso
     )
 )
 class AOkvqaAdapter(VisionLanguageAdapter):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

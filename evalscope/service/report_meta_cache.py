@@ -11,6 +11,7 @@ parsing them (expensive) only for references that are new or have changed since
 the last request. Entries are keyed by ``(root, ref)`` so switching the outputs
 root never makes one root's entries evict or shadow another's.
 """
+
 import glob
 import hashlib
 import os
@@ -19,7 +20,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from evalscope.constants import DataCollection
 from evalscope.report import ReportRef
-from evalscope.utils.data_utils import report_model_dir
+from evalscope.report.data_frames import report_model_dir
 
 # Per-path identity: relative path, mtime (ns), ctime (ns), and size.
 Fingerprint = Tuple[Tuple[str, int, int, int], ...]
@@ -56,6 +57,14 @@ def report_ref_fingerprint(root: str, ref: ReportRef) -> Fingerprint:
     except OSError:
         pass
 
+    manifest_path = os.path.join(run_dir, 'task_info.json')
+    try:
+        st = os.stat(manifest_path)
+        entries.append(('@task_info', st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+        entries.append(('@task_info_inode', st.st_ino, 0, 0))
+    except OSError:
+        entries.append(('@task_info', 0, 0, 0))
+
     for file_path in glob.glob(os.path.join(model_dir, '**', '*.json'), recursive=True):
         if os.path.basename(file_path) == DataCollection.REPORT_NAME:
             continue
@@ -68,8 +77,9 @@ def report_ref_fingerprint(root: str, ref: ReportRef) -> Fingerprint:
     return tuple(entries)
 
 
-def build_report_meta_cached(root: str, ref: ReportRef, fingerprint: Fingerprint,
-                             compute: MetaBuilder) -> Optional[dict]:
+def build_report_meta_cached(
+    root: str, ref: ReportRef, fingerprint: Fingerprint, compute: MetaBuilder
+) -> Optional[dict]:
     """Return the cached metadata for ``ref`` or compute and store it.
 
     ``fingerprint`` is supplied by the caller (which already needs it for the

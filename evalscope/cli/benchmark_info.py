@@ -38,9 +38,11 @@ Usage:
 """
 
 import json
-from argparse import ArgumentParser, Namespace
+from argparse import Namespace
+from typing import Any, Dict, List, Optional, Union
 
-from evalscope.cli.base import CLICommand
+from evalscope.api.benchmark import BenchmarkMeta, DataAdapter
+from evalscope.cli.base import ArgumentParserWithSubParsers, CLICommand
 from evalscope.utils.logger import get_logger
 
 logger = get_logger()
@@ -76,7 +78,7 @@ class BenchmarkInfoCMD(CLICommand):
         self.args = args
 
     @staticmethod
-    def define_args(parsers: ArgumentParser):
+    def define_args(parsers: ArgumentParserWithSubParsers) -> None:
         parser = parsers.add_parser(
             BenchmarkInfoCMD.name,
             help='Display benchmark information and manage documentation',
@@ -86,8 +88,7 @@ class BenchmarkInfoCMD(CLICommand):
             'benchmark',
             nargs='*',
             default=None,
-            help=
-            'Name(s) of the benchmark(s) (e.g., gsm8k, mmlu). Multiple benchmarks can be separated by spaces. Use --all for all benchmarks.',
+            help='Name(s) of the benchmark(s) (e.g., gsm8k, mmlu). Multiple benchmarks can be separated by spaces. Use --all for all benchmarks.',
         )
 
         parser.add_argument(
@@ -140,6 +141,12 @@ class BenchmarkInfoCMD(CLICommand):
         )
 
         parser.add_argument(
+            '--update-index',
+            action='store_true',
+            help='Regenerate evalscope/benchmarks/_index.json (benchmark name -> adapter module)',
+        )
+
+        parser.add_argument(
             '--format',
             choices=['text', 'json', 'markdown'],
             default='text',
@@ -160,7 +167,13 @@ class BenchmarkInfoCMD(CLICommand):
         import os
 
         from evalscope.api.registry import BENCHMARK_REGISTRY, get_benchmark
+
         os.environ['BUILD_DOC'] = '1'
+
+        # Handle --update-index flag
+        if self.args.update_index:
+            self._update_index()
+            return
 
         # Handle --list flag
         if self.args.list:
@@ -209,10 +222,10 @@ class BenchmarkInfoCMD(CLICommand):
                     raise
 
     @staticmethod
-    def _format_metric_list(metric_list):
+    def _format_metric_list(metric_list: List[Union[str, Dict[str, Any]]]):
         """Format metric_list (mixed strings and dicts) into readable strings."""
         formatted = []
-        for item in (metric_list or []):
+        for item in metric_list or []:
             if isinstance(item, str):
                 formatted.append(item)
             elif isinstance(item, dict):
@@ -292,7 +305,7 @@ class BenchmarkInfoCMD(CLICommand):
             workers=self.args.workers,
         )
 
-        print(f'\nTranslation complete:')
+        print('\nTranslation complete:')
         print(f'  Total: {result.get("total", 0)}')
         print(f'  Translated: {result.get("translated", 0)}')
         print(f'  Skipped: {result.get("skipped", 0)}')
@@ -301,12 +314,25 @@ class BenchmarkInfoCMD(CLICommand):
             for name, error in result['errors'][:5]:
                 print(f'    - {name}: {error}')
 
+    def _update_index(self):
+        """Regenerate the benchmark name -> adapter module index.
+
+        The index is a generated artifact and must not be hand-edited: it is derived
+        from the registry, because a benchmark name is not derivable from its module
+        path (one module may register several names).
+        """
+        from evalscope.benchmarks import write_index
+
+        index = write_index()
+        print(f'Benchmark index updated: {len(index)} entries')
+
     def _generate_docs(self):
         """Generate documentation from persisted benchmark data."""
         from evalscope.utils.doc_utils.generate_dataset_md import generate_docs
+
         generate_docs()
 
-    def _display_info(self, adapter):
+    def _display_info(self, adapter: DataAdapter) -> None:
         """Display benchmark information."""
         from evalscope.utils.doc_utils.generate_dataset_md import get_adapter_category
 
@@ -320,7 +346,7 @@ class BenchmarkInfoCMD(CLICommand):
         else:
             self._display_text(meta, category)
 
-    def _display_text(self, meta, category=None):
+    def _display_text(self, meta: BenchmarkMeta, category: Optional[str] = None) -> None:
         """Display info in text format."""
         print(f'\n{"=" * 60}')
         print(f'Benchmark: {meta.pretty_name or meta.name}')
@@ -342,18 +368,18 @@ class BenchmarkInfoCMD(CLICommand):
         # Metrics
         if meta.metric_list:
             formatted_metrics = self._format_metric_list(meta.metric_list)
-            print(f'\nMetrics:')
+            print('\nMetrics:')
             for m in formatted_metrics:
                 print(f'  - {m}')
 
         if meta.description:
-            print(f'\nDescription:')
+            print('\nDescription:')
             for line in meta.description.split('\n'):
                 print(f'  {line}')
 
         # Prompt template (truncated for readability)
         if meta.prompt_template:
-            print(f'\nPrompt Template:')
+            print('\nPrompt Template:')
             template = meta.prompt_template
             if len(template) > 200:
                 template = template[:200] + '... [TRUNCATED]'
@@ -362,7 +388,7 @@ class BenchmarkInfoCMD(CLICommand):
 
         # System prompt (truncated for readability)
         if meta.system_prompt:
-            print(f'\nSystem Prompt:')
+            print('\nSystem Prompt:')
             prompt = meta.system_prompt
             if len(prompt) > 200:
                 prompt = prompt[:200] + '... [TRUNCATED]'
@@ -371,7 +397,7 @@ class BenchmarkInfoCMD(CLICommand):
 
         # Configurable parameters (extra_params with full spec)
         if meta.extra_params:
-            print(f'\nConfigurable Parameters:')
+            print('\nConfigurable Parameters:')
             for param_name, param_spec in meta.extra_params.items():
                 print(f'  {param_name}:')
                 if meta._is_spec_entry(param_spec):
@@ -385,14 +411,14 @@ class BenchmarkInfoCMD(CLICommand):
 
         if meta.data_statistics:
             stats = meta.data_statistics
-            print(f'\nStatistics:')
+            print('\nStatistics:')
             print(f'  Total samples:        {stats.total_samples:,}')
             print(f'  Prompt length (mean): {stats.prompt_length_mean:.1f}')
             print(f'  Prompt length (range): {stats.prompt_length_min} - {stats.prompt_length_max}')
 
         print()
 
-    def _display_json(self, adapter, category=None):
+    def _display_json(self, adapter: DataAdapter, category: Optional[str] = None) -> None:
         """Display info in JSON format."""
         from evalscope.utils.doc_utils import load_benchmark_data
 
@@ -431,10 +457,9 @@ class BenchmarkInfoCMD(CLICommand):
         }
         print(json.dumps(data, indent=2, ensure_ascii=False))
 
-    def _display_markdown(self, adapter):
+    def _display_markdown(self, adapter: DataAdapter) -> None:
         """Display info in markdown format."""
         from evalscope.utils.doc_utils import load_benchmark_data
-        from evalscope.utils.doc_utils.generate_dataset_md import generate_readme_content
 
         # Try to load from persisted data first
         try:
@@ -448,6 +473,12 @@ class BenchmarkInfoCMD(CLICommand):
             pass
 
         # Fall back to generating from adapter
-        from evalscope.utils.readme_generator import generate_benchmark_readme
-        readme = generate_benchmark_readme(adapter, compute_if_missing=False)
+        from evalscope.utils.doc_utils.generate_dataset_md import extract_adapter_meta
+        from evalscope.utils.doc_utils.readme_generator import generate_readme_from_dict
+
+        readme = generate_readme_from_dict(
+            adapter.name,
+            extract_adapter_meta(adapter),
+            lang='en',
+        )
         print(readme)

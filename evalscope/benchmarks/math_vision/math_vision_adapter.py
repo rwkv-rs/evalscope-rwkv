@@ -6,6 +6,7 @@ from evalscope.api.benchmark import BenchmarkMeta, VisionLanguageAdapter
 from evalscope.api.dataset import Sample
 from evalscope.api.evaluator import TaskState
 from evalscope.api.messages import ChatMessageUser, Content, ContentImage, ContentText
+from evalscope.api.metric import Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
 from evalscope.utils.io_utils import bytes_to_base64
@@ -23,9 +24,11 @@ SUBSET_LIST = ['level 1', 'level 2', 'level 3', 'level 4', 'level 5']
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='math_vision',
         pretty_name='MathVision',
         dataset_id='evalscope/MathVision',
+        hf_dataset_id='MathLLMs/MathVision',
         tags=[Tags.MATH, Tags.REASONING, Tags.MULTIPLE_CHOICE, Tags.MULTI_MODAL],
         description="""
 ## Overview
@@ -56,17 +59,12 @@ MATH-Vision (MATH-V) is a meticulously curated dataset of 3,040 high-quality mat
 - Multiple-choice uses CoT prompting with letter answers
 """,
         subset_list=SUBSET_LIST,
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         eval_split='test',
         prompt_template=OPEN_PROMPT,
     )
 )
 class MathVisionAdapter(VisionLanguageAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.reformat_subset = True
@@ -83,7 +81,7 @@ class MathVisionAdapter(VisionLanguageAdapter):
             'solution': record['solution'],
             'level': record['level'],
             'question_type': question_type,
-            'subject': record['subject']
+            'subject': record['subject'],
         }
         if question_type == 'multi_choice':
             label_answer = record['answer']
@@ -92,14 +90,14 @@ class MathVisionAdapter(VisionLanguageAdapter):
                 choices=answers_list,
                 target=label_answer,
                 subset_key=f'level {record["level"]}',
-                metadata=metadata
+                metadata=metadata,
             )
         elif question_type == 'free_form':
             return Sample(
                 input=[ChatMessageUser(content=content_list)],
                 target=record['answer'],
                 subset_key=f'level {record["level"]}',
-                metadata=metadata
+                metadata=metadata,
             )
         else:
             raise ValueError(f'Unexpected question_type: {question_type}')
@@ -107,17 +105,17 @@ class MathVisionAdapter(VisionLanguageAdapter):
     @staticmethod
     def create_content_and_answers_list(record: Dict[str, Any], question_type) -> tuple[List[Content], List[str]]:
         """
-            Create a list of content elements and a list of answers from a record.
+        Create a list of content elements and a list of answers from a record.
 
-            Args:
-                record (dict): The record containing question, images, and options.
-                question_type (str): The type of this question
+        Args:
+            record (dict): The record containing question, images, and options.
+            question_type (str): The type of this question
 
 
-            Returns:
-                tuple: A tuple containing:
-                    - content_list (list): A list of content elements (text and images).
-                    - answers_list (list): A list of possible answers (for multiple-choice questions).
+        Returns:
+            tuple: A tuple containing:
+                - content_list (list): A list of content elements (text and images).
+                - answers_list (list): A list of possible answers (for multiple-choice questions).
         """
         question: str = record['question']
         if question_type == 'multi_choice':
@@ -136,4 +134,20 @@ class MathVisionAdapter(VisionLanguageAdapter):
     def extract_answer(self, prediction: str, task_state):
         from evalscope.metrics.math.parser import extract_answer
 
+        if task_state.metadata.get('question_type') == 'multi_choice':
+            from evalscope.utils.multi_choices import parse_answers
+
+            return ''.join(sorted(parse_answers(task_state, completion=prediction)))
         return extract_answer(prediction)
+
+    def match_score(
+        self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
+    ) -> Score:
+        """Keep categorical answers on exact matching; open answers use Math-Verify."""
+        if task_state.metadata.get('question_type') == 'multi_choice':
+            return Score(
+                prediction=original_prediction,
+                extracted_prediction=filtered_prediction,
+                value={'accuracy': float(bool(filtered_prediction) and filtered_prediction == reference)},
+            )
+        return super().match_score(original_prediction, filtered_prediction, reference, task_state)

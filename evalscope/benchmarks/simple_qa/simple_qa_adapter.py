@@ -133,16 +133,16 @@ SimpleQA is a benchmark by OpenAI designed to evaluate language models' ability 
 - Tests models' ability to admit uncertainty appropriately
 """,
         dataset_id='evalscope/SimpleQA',
+        hf_dataset_id='basicv8vc/SimpleQA',
         metric_list=['is_correct', 'is_incorrect', 'is_not_attempted'],
         primary_metric='is_correct',
         few_shot_num=0,
         train_split=None,
         eval_split='test',
-        prompt_template='Answer the question:\n\n{question}'
+        prompt_template='Answer the question:\n\n{question}',
     )
 )
 class SimpleQAAdapter(DefaultDataAdapter):
-
     scoring_policy = ScoringPolicy.JUDGE_ONLY
 
     def __init__(self, *args, **kwargs):
@@ -175,21 +175,9 @@ class SimpleQAAdapter(DefaultDataAdapter):
             schema_model=Grade,
             case_id='grade',
             scores={
-                'A': {
-                    'is_correct': 1.0,
-                    'is_incorrect': 0.0,
-                    'is_not_attempted': 0.0
-                },
-                'B': {
-                    'is_correct': 0.0,
-                    'is_incorrect': 1.0,
-                    'is_not_attempted': 0.0
-                },
-                'C': {
-                    'is_correct': 0.0,
-                    'is_incorrect': 0.0,
-                    'is_not_attempted': 1.0
-                },
+                'A': {'is_correct': 1.0, 'is_incorrect': 0.0, 'is_not_attempted': 0.0},
+                'B': {'is_correct': 0.0, 'is_incorrect': 1.0, 'is_not_attempted': 0.0},
+                'C': {'is_correct': 0.0, 'is_incorrect': 0.0, 'is_not_attempted': 1.0},
             },
             main_score_name='is_correct',
         )

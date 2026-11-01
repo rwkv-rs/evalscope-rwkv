@@ -8,11 +8,8 @@ from evalscope.api.evaluator import TaskState
 from evalscope.api.metric import Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
-from evalscope.utils.logger import get_logger
 
-logger = get_logger()
-
-DROP_EXAMPLES = '''Some examples of passages and Q&A are provided below.
+DROP_EXAMPLES = """Some examples of passages and Q&A are provided below.
 
 # Examples
 ---
@@ -30,7 +27,7 @@ Passage: Hoping to rebound from their road loss to the Bills, the Chargers flew 
 Question: How many total yards of touchdown passes did Drew Brees make?
 Answer:  43
 
-'''  # noqa: E501
+"""  # noqa: E501
 
 
 @register_benchmark(
@@ -70,20 +67,16 @@ DROP (Discrete Reasoning Over Paragraphs) is a challenging reading comprehension
         metric_list=['em', 'f1'],
         primary_metric='f1',
         few_shot_num=3,
+        few_shot_mode='fixed',
+        allowed_few_shot_nums=(0, 3),
         train_split=None,
         eval_split='validation',
-        prompt_template=
-        'You will be asked to read a passage and answer a question. {drop_examples}\n# Your Task\n\n---\n{query}\n\nThink step by step, then write a line of the form "Answer: [ANSWER]" at the end of your response.',  # noqa: E501
+        prompt_template='You will be asked to read a passage and answer a question. {drop_examples}\n# Your Task\n\n---\n{query}\n\nThink step by step, then write a line of the form "Answer: [ANSWER]" at the end of your response.',  # noqa: E501
     )
 )
 class DROPAdapter(DefaultDataAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
-        if self.few_shot_num != 0 and self.few_shot_num != 3:
-            self.few_shot_num = 3
-            logger.info(f'Few shot num is set to {self.few_shot_num} for DROP dataset by system.')
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """
@@ -106,13 +99,13 @@ class DROPAdapter(DefaultDataAdapter):
             metadata={
                 'passage': record['passage'],
                 'answer': record['answer'],
-                'validated_answers': record['validated_answers']
-            }
+                'validated_answers': record['validated_answers'],
+            },
         )
 
     def format_prompt_template(self, sample: Sample) -> str:
         drop_examples = ''
-        query = f"Passage: {sample.metadata['passage']}\nQuestion: {sample.input}"
+        query = f'Passage: {sample.metadata["passage"]}\nQuestion: {sample.input}'
 
         return self.prompt_template.format(
             drop_examples=drop_examples,
@@ -121,7 +114,7 @@ class DROPAdapter(DefaultDataAdapter):
 
     def format_fewshot_template(self, fewshot, sample):
         drop_examples = DROP_EXAMPLES
-        query = f"Passage: {sample.metadata['passage']}\nQuestion: {sample.input}"
+        query = f'Passage: {sample.metadata["passage"]}\nQuestion: {sample.input}'
 
         return self.prompt_template.format(
             drop_examples=drop_examples,

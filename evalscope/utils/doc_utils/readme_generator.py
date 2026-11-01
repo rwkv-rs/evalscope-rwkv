@@ -9,14 +9,14 @@ and usage instructions.
 
 import json
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from evalscope.utils.logger import get_logger
 
 logger = get_logger()
 
 # Standard README template with all sections
-README_TEMPLATE = '''# {pretty_name}
+README_TEMPLATE = """# {pretty_name}
 
 {description}
 
@@ -46,7 +46,7 @@ README_TEMPLATE = '''# {pretty_name}
 {extra_params_section}{sandbox_config_section}
 {usage_section}
 
-'''
+"""
 
 
 def _format_dataset_link(dataset_id: str) -> str:
@@ -199,6 +199,9 @@ def _format_usage_section(
     sandbox_config: Optional[Dict] = None,
     extra_params: Optional[Dict] = None,
     agent_config: Optional[Dict] = None,
+    requires_judge: bool = False,
+    eval_type: Optional[str] = None,
+    requires_local_dataset: bool = False,
 ) -> str:
     """
     Format the usage section with CLI and Python examples.
@@ -209,6 +212,9 @@ def _format_usage_section(
         sandbox_config: Sandbox configuration (if any)
         extra_params: Extra parameters configuration (if any)
         agent_config: Built-in AgentLoop defaults (if this is an agent-loop benchmark)
+        requires_judge: Whether this benchmark requires a configured Native Judge
+        eval_type: Required inference protocol for typed benchmark adapters
+        requires_local_dataset: Whether an example must provide a local dataset directory
 
     Returns:
         Formatted usage section markdown string
@@ -222,6 +228,8 @@ def _format_usage_section(
         )
     if extra_params:
         dataset_args_comments.append('            # extra_params: {}  # uses default extra parameters')
+    if requires_local_dataset:
+        dataset_args_comments.append("            'local_path': '/path/to/data',  # contains default_test.jsonl")
 
     # Build CLI command
     cli_lines = [
@@ -231,8 +239,14 @@ def _format_usage_section(
         '    --api-key EMPTY_TOKEN \\',
         f'    --datasets {name} \\',
     ]
+    if eval_type:
+        cli_lines.insert(2, f'    --eval-type {eval_type} ' + '\\')
+        cli_lines = [line.replace('OPENAI_API_COMPAT_URL', 'http://127.0.0.1:18131/v1') for line in cli_lines]
+    if requires_local_dataset:
+        local_args = json.dumps({name: {'local_path': '/path/to/data'}})
+        cli_lines.append(f"    --dataset-args '{local_args}' " + '\\')
     if sandbox_config:
-        cli_lines.append("    --sandbox '{\"enabled\": true}' \\")
+        cli_lines.append('    --sandbox \'{"enabled": true}\' \\')
     emit_agent_config = bool(agent_config and agent_config.get('strategy') and agent_config.get('max_steps'))
     if emit_agent_config:
         cli_agent_config = json.dumps(
@@ -243,44 +257,52 @@ def _format_usage_section(
             },
             separators=(',', ':'),
         )
-        cli_lines.append(f"    --agent-config '{cli_agent_config}' \\")
+        cli_lines.append(f"    --agent-config '{cli_agent_config}' " + '\\')
+    if requires_judge:
+        cli_judge_config = {'strategy': 'llm', 'models': [{'model_id': 'YOUR_JUDGE_MODEL'}]}
+        cli_lines.append(f"    --judge '{json.dumps(cli_judge_config, separators=(',', ':'))}' " + '\\')
     cli_lines.append('    --limit 10  # Remove this line for formal evaluation')
 
     # Build Python code
     python_dataset_args = ''
     if dataset_args_comments:
-        python_dataset_args = f'''    dataset_args={{
+        python_dataset_args = f"""    dataset_args={{
         '{name}': {{
 {chr(10).join(dataset_args_comments)}
         }}
     }},
-'''
+"""
 
     python_use_sandbox = "    sandbox={'enabled': True},\n" if sandbox_config else ''
     python_imports = ['from evalscope import run_task', 'from evalscope.config import TaskConfig']
     python_agent_config = ''
+    python_judge_config = ''
     if emit_agent_config:
         python_imports = ['from evalscope import TaskConfig, run_task']
         python_imports.append('from evalscope.api.agent import NativeAgentConfig')
-        python_agent_config = f'''    agent_config=NativeAgentConfig(
-        strategy='{agent_config.get("strategy")}',
-        max_steps={agent_config.get("max_steps")},
+        python_agent_config = f"""    agent_config=NativeAgentConfig(
+        strategy='{agent_config.get('strategy')}',
+        max_steps={agent_config.get('max_steps')},
     ),
-'''
+"""
+    if requires_judge:
+        python_judge_config = "    judge={'strategy': 'llm', 'models': [{'model_id': 'YOUR_JUDGE_MODEL'}]},\n"
 
-    python_code = f'''{chr(10).join(python_imports)}
+    python_eval_type = f"    eval_type='{eval_type}',\n" if eval_type else ''
+    api_url = 'http://127.0.0.1:18131/v1' if eval_type else 'OPENAI_API_COMPAT_URL'
+    python_code = f"""{chr(10).join(python_imports)}
 
 task_cfg = TaskConfig(
     model='YOUR_MODEL',
-    api_url='OPENAI_API_COMPAT_URL',
+{python_eval_type}    api_url='{api_url}',
     api_key='EMPTY_TOKEN',
     datasets=['{name}'],
-{python_use_sandbox}{python_agent_config}{python_dataset_args}    limit=10,  # Remove this line for formal evaluation
+{python_use_sandbox}{python_agent_config}{python_judge_config}{python_dataset_args}    limit=10,  # Remove this line for formal evaluation
 )
 
-run_task(task_cfg=task_cfg)'''
+run_task(task_cfg=task_cfg)"""
 
-    return f'''## Usage
+    return f"""## Usage
 
 ### Using CLI
 
@@ -293,7 +315,7 @@ run_task(task_cfg=task_cfg)'''
 ```python
 {python_code}
 ```
-'''
+"""
 
 
 def _format_statistics_section_from_dict(statistics: Optional[Dict]) -> str:
@@ -362,8 +384,7 @@ def _format_multimodal_statistics_from_dict(multimodal: Dict) -> str:
         resolution_range = image_stats.get('resolution_range')
         if resolution_range and (resolution_range.get('min') or resolution_range.get('max')):
             lines.append(
-                f'| Resolution Range | {resolution_range.get("min", "N/A")} - '
-                f'{resolution_range.get("max", "N/A")} |'
+                f'| Resolution Range | {resolution_range.get("min", "N/A")} - {resolution_range.get("max", "N/A")} |'
             )
 
         formats = image_stats.get('formats', [])
@@ -516,6 +537,9 @@ def generate_readme_from_dict(
             sandbox_config=meta.get('sandbox_config'),
             extra_params=meta.get('extra_params'),
             agent_config=meta.get('agent_config'),
+            requires_judge=meta.get('requires_judge', False),
+            eval_type=meta.get('eval_type'),
+            requires_local_dataset=meta.get('requires_local_dataset', False),
         ),
     )
 

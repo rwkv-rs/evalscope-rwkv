@@ -4,7 +4,7 @@ from typing import List, Optional
 from evalscope.api.metric import AggScore
 from evalscope.api.metric.semantics import MetricIdentity, MetricSelector
 from evalscope.metrics.semantics import get_semantics_resolver
-from evalscope.metrics.semantics.identity import migrate_legacy_identity
+from evalscope.metrics.semantics.legacy_identity import migrate_legacy_identity
 from evalscope.report import gen_table, get_display_data_frame, get_report_list
 from evalscope.report.generator import ReportGenerator
 from evalscope.report.report import Category, Metric, Report, Subset
@@ -129,6 +129,30 @@ def test_gen_table_disambiguates_repeated_metric_display_names() -> None:
 
     assert 'Accuracy ↑ (accuracy:mean)' in table
     assert 'Accuracy ↑ (fact_acc:mean)' in table
+
+
+def test_gen_table_adds_overall_row_for_each_metric() -> None:
+    adapter = _StubAdapter('multi_metric', primary_metric='accuracy')
+    report = ReportGenerator.generate_report(
+        score_dict={
+            'first': [
+                AggScore(score=0.5, metric_name='accuracy', aggregation='mean', num=2),
+                AggScore(score=0.25, metric_name='f1', aggregation='mean', num=2),
+            ],
+            'second': [
+                AggScore(score=1.0, metric_name='accuracy', aggregation='mean', num=1),
+                AggScore(score=1.0, metric_name='f1', aggregation='mean', num=1),
+            ],
+        },
+        model_name='test-model',
+        data_adapter=adapter,
+    )
+
+    table = report.to_dataframe(add_overall_metric=True)
+    overall_rows = table[table['Subset'] == 'OVERALL']
+
+    assert overall_rows['Metric'].tolist() == ['accuracy:mean', 'f1:mean']
+    assert overall_rows['Score'].tolist() == [0.6667, 0.5]
 
 
 def test_gen_table_hides_placeholder_category_columns_without_changing_dataframe() -> None:

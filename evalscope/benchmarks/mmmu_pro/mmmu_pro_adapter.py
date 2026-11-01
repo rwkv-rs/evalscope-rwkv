@@ -87,6 +87,7 @@ MMMU-PRO is an enhanced multimodal benchmark designed to rigorously assess the g
 - Rich metadata includes topic difficulty and subject information
 """,  # noqa: E501
         dataset_id='AI-ModelScope/MMMU_Pro',
+        hf_dataset_id='MMMU/MMMU_Pro',
         subset_list=SUBSET_LIST,
         metric_list=['acc'],
         eval_split='test',
@@ -97,9 +98,9 @@ MMMU-PRO is an enhanced multimodal benchmark designed to rigorously assess the g
                 'type': 'str',
                 'description': f'Dataset format variant. Choices: {DATASET_FORMATS}.',
                 'value': 'standard (4 options)',
-                'choices': DATASET_FORMATS
+                'choices': DATASET_FORMATS,
             }
-        }
+        },
     )
 )
 class MMMUPROAdapter(VisionLanguageAdapter, MultiChoiceAdapter):
@@ -119,7 +120,7 @@ class MMMUPROAdapter(VisionLanguageAdapter, MultiChoiceAdapter):
             'explanation': record.get('explanation'),
             'img_type': record.get('img_type'),
             'topic_difficulty': record.get('topic_difficulty'),
-            'subject': record.get('subject')
+            'subject': record.get('subject'),
         }
 
         answers_list: List[str] = ast.literal_eval(record['options'])

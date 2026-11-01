@@ -46,25 +46,22 @@ CMATH is a Chinese elementary school mathematics benchmark containing 1,698 prob
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='cmath',
         pretty_name='CMATH',
         dataset_id='evalscope/cmath',
+        hf_dataset_id='weitianwen/cmath',
         description=DESCRIPTION.strip(),
         tags=[Tags.MATH, Tags.REASONING, Tags.CHINESE],
         subset_list=['Grade 1', 'Grade 2', 'Grade 3', 'Grade 4', 'Grade 5', 'Grade 6'],
         few_shot_num=0,
         train_split=None,
         eval_split='test',
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         prompt_template=PROMPT_TEMPLATE,
     )
 )
 class CMathAdapter(DefaultDataAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.reformat_subset = True

@@ -22,9 +22,11 @@ Please reason step by step, and put your final answer within \boxed{{}}.
 # https://huggingface.co/datasets/MathArena/hmmt_feb_2025
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='hmmt25',
         pretty_name='HMMT25',
         dataset_id='evalscope/hmmt_feb_2025',
+        hf_dataset_id='MathArena/hmmt_feb_2025',
         description="""
 ## Overview
 
@@ -57,16 +59,11 @@ HMMT February 2025 (MathArena) is a challenging evaluation benchmark derived fro
         few_shot_num=0,
         train_split=None,
         eval_split='train',  # HF dataset provides split 'train'
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         prompt_template=PROMPT_TEMPLATE,
     )
 )
 class HMMT25Adapter(DefaultDataAdapter):
-
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         problem = str(record.get('problem', '')).strip()
         target = str(record.get('answer', '')).strip()

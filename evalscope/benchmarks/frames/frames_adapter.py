@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ Format your response as follows: "Therefore, the answer is (insert answer here)"
 @register_benchmark(
     BenchmarkMeta(
         name='frames',
+        evaluation_version='v1.1',
         pretty_name='FRAMES',
         tags=[Tags.REASONING, Tags.LONG_CONTEXT],
         description="""
@@ -72,7 +74,6 @@ FRAMES is a comprehensive evaluation dataset designed to test the capabilities o
     )
 )
 class FramesAdapter(DefaultDataAdapter):
-
     scoring_policy = ScoringPolicy.JUDGE_DEFAULT
 
     def __init__(self, **kwargs):
@@ -105,14 +106,11 @@ class FramesAdapter(DefaultDataAdapter):
         Returns:
             Sample: Sample object with input, target, and metadata.
         """
-        context = '\n'.join([f"{i['title']}\n{i['text']}" for i in record['wiki_items']])
+        context = '\n'.join([f'{i["title"]}\n{i["text"]}' for i in record['wiki_items']])
         question = record['Prompt']
 
         return Sample(
-            input=question, target=record['Answer'], metadata={
-                'context': context,
-                'wiki_items': record['wiki_items']
-            }
+            input=question, target=record['Answer'], metadata={'context': context, 'wiki_items': record['wiki_items']}
         )
 
     def format_prompt_template(self, sample):
@@ -125,13 +123,12 @@ class FramesAdapter(DefaultDataAdapter):
         Extract the answer from the model prediction.
         """
         response = prediction.replace('*', '')
-
-        if 'the answer is' in response:
-            ans = response.rsplit('the answer is', 1)[-1].strip().strip('.').strip()
-        else:
-            ans = ''
-
-        return ans
+        # Read after the last "the answer is", in any case, to the end of the line the answer is on
+        matches = list(re.finditer(r'(?i)the answer is', response))
+        if not matches:
+            return ''
+        answer = re.match(r'[\s:]*([^\n]*)', response[matches[-1].end() :]).group(1)
+        return answer.strip().strip('.').strip()
 
     def match_score(
         self,
@@ -165,14 +162,17 @@ class FramesAdapter(DefaultDataAdapter):
 
         def request(case, placement, completed_cases, judge_context) -> JudgeRequest:
             from .utils import GENERAL_ORM_PROMPT, ORM_USER_TEMPLATE
-            prompt = ORM_USER_TEMPLATE.format(
-                problem=judge_context.task_state.input_text,
-                answer_1=judge_context.reference,
-                answer_2=judge_context.filtered_prediction,
-            ) + case.output_contract.instruction()
+
+            prompt = (
+                ORM_USER_TEMPLATE.format(
+                    problem=judge_context.task_state.input_text,
+                    answer_1=judge_context.reference,
+                    answer_2=judge_context.filtered_prediction,
+                )
+                + case.output_contract.instruction()
+            )
             return JudgeRequest(
-                messages=[ChatMessageSystem(content=GENERAL_ORM_PROMPT),
-                          ChatMessageUser(content=prompt)]
+                messages=[ChatMessageSystem(content=GENERAL_ORM_PROMPT), ChatMessageUser(content=prompt)]
             )
 
         def reduce(case_verdicts, judge_context) -> ReducedVerdict:
@@ -182,5 +182,5 @@ class FramesAdapter(DefaultDataAdapter):
             cases=[JudgeCase(case_id='equivalence', output_contract=EQUIVALENCE_CONTRACT)],
             request=request,
             reduce=reduce,
-            main_score_name='acc'
+            main_score_name='acc',
         )

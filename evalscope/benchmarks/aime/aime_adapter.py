@@ -105,6 +105,7 @@ Remember to put your answer inside \\boxed{{}}."""
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='aime24',
         pretty_name='AIME-2024',
         tags=[Tags.MATH, Tags.REASONING],
@@ -136,12 +137,9 @@ AIME 2024 (American Invitational Mathematics Examination 2024) is a benchmark ba
 - Problems are significantly harder than GSM8K or standard MATH benchmark
 """,
         dataset_id='evalscope/aime24',
+        hf_dataset_id='math-ai/aime24',
         subset_list=['default'],
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         few_shot_num=0,
         train_split=None,
         eval_split='test',
@@ -149,7 +147,6 @@ AIME 2024 (American Invitational Mathematics Examination 2024) is a benchmark ba
     )
 )
 class AIME24Adapter(DefaultDataAdapter):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -161,39 +158,37 @@ class AIME24Adapter(DefaultDataAdapter):
 
     def extract_answer(self, prediction: str, task_state: TaskState) -> str:
         from evalscope.metrics.math.parser import extract_answer
-        from .math_normalize import normalize_answer
 
-        extracted_pred = extract_answer(prediction)
-        filtered_pred = normalize_answer(extracted_pred)
-        return filtered_pred
+        return extract_answer(prediction)
 
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
-        from .grader import grade_answer
+        from evalscope.constants import ScoreStatus
+        from evalscope.metrics.math.contracts import MathEvaluationError
+        from evalscope.metrics.math.parser import compare_answers
 
-        score = Score(
-            extracted_prediction=filtered_prediction,
-            prediction=original_prediction,
-        )
-
+        score = Score(extracted_prediction=filtered_prediction, prediction=original_prediction)
         try:
-            is_correct = grade_answer(filtered_prediction, reference)
-            accuracy_score = 1.0 if is_correct else 0.0
-            score.value['acc'] = accuracy_score
-        except Exception as e:
-            logger.error(f'Error in custom grading: {e}')
-            score.value['acc'] = 0.0
-            score.metadata['acc'] = f'grading_error: {str(e)}'
+            result = compare_answers(filtered_prediction, reference, integer_only=True)
+            score.value = {'acc': float(result.matched)}
+            score.metadata['math_reason'] = result.reason
+        except MathEvaluationError as exc:
+            score.status = ScoreStatus.EXCLUDED
+            score.metadata['metric_unavailable'] = True
+            score.metadata['acc'] = f'error: {exc}'
         return score
 
     def judge_definition(self, context: JudgeContext) -> JudgeDefinition:
 
         def request(case, placement, completed_cases, judge_context) -> JudgeRequest:
-            prompt = JUDGE_PROMPT.format(
-                expression1=judge_context.original_prediction,
-                expression2=judge_context.reference,
-            ) + case.output_contract.instruction()
+            prompt = (
+                JUDGE_PROMPT.format(
+                    expression1=judge_context.original_prediction,
+                    expression2=judge_context.reference,
+                )
+                + case.output_contract.instruction()
+            )
             return JudgeRequest(messages=[ChatMessageUser(content=prompt)])
 
         def reduce(case_verdicts, judge_context) -> ReducedVerdict:
@@ -203,12 +198,13 @@ class AIME24Adapter(DefaultDataAdapter):
             cases=[JudgeCase(case_id='equivalence', output_contract=EQUIVALENCE_CONTRACT)],
             request=request,
             reduce=reduce,
-            main_score_name='acc'
+            main_score_name='acc',
         )
 
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='aime25',
         pretty_name='AIME-2025',
         tags=[Tags.MATH, Tags.REASONING],
@@ -239,24 +235,21 @@ AIME 2025 (American Invitational Mathematics Examination 2025) is a benchmark ba
 - Uses LLM-as-judge for mathematical equivalence checking
 """,
         dataset_id='evalscope/aime25',
+        hf_dataset_id='math-ai/aime25',
         subset_list=['default'],
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         few_shot_num=0,
         train_split=None,
         eval_split='test',
         prompt_template=PROMPT_TEMPLATE,
     )
 )
-class AIME25Adapter(AIME24Adapter):
-    ...
+class AIME25Adapter(AIME24Adapter): ...
 
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='aime26',
         pretty_name='AIME-2026',
         tags=[Tags.MATH, Tags.REASONING],
@@ -287,17 +280,13 @@ AIME 2026 (American Invitational Mathematics Examination 2026) is a benchmark ba
 - Uses LLM-as-judge for mathematical equivalence checking
 """,
         dataset_id='evalscope/aime26',
+        hf_dataset_id='math-ai/aime26',
         subset_list=['default'],
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         few_shot_num=0,
         train_split=None,
         eval_split='test',
         prompt_template=PROMPT_TEMPLATE,
     )
 )
-class AIME26Adapter(AIME24Adapter):
-    ...
+class AIME26Adapter(AIME24Adapter): ...

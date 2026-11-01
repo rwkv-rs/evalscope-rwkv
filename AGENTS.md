@@ -14,12 +14,18 @@ Python ≥ 3.10 (3.10 / 3.11 / 3.12). Dependencies: `requirements/framework.txt`
 ## Build, lint, test
 
 ```bash
-make lint                                                                       # required before commit (yapf + Ruff + flake8 + basic pre-commit hooks)
+make lint                                                                       # apply Ruff fixes/formatting and run all pre-commit checks
+make lint-imports                                                               # architecture contracts (import direction, see .importlinter)
 pytest tests/cli/test_all.py::TestRun::test_ci_lite -v -s -p no:warnings        # CI smoke test
 pytest tests/perf/test_perf_basic.py::TestPerfBasic::test_multi_parallel_sweep -v -s    # perf
 ```
 
 Commits failing `make lint` are rejected on `main`.
+
+Choose validation for the changed behavior: targeted tests for code changes, perf tests for perf changes,
+and diff/link/format checks for documentation-only or instruction-only edits. Run the Submission checks
+before committing. After relevant checks pass, repeat or broaden them only for new changes, failures,
+or unresolved concerns. Local checks and fixes within the requested scope do not need repeated approval.
 
 ## Docs generation
 
@@ -63,9 +69,10 @@ run_task(TaskConfig(model='Qwen/Qwen2.5-0.5B-Instruct', datasets=['gsm8k'], limi
 ## Code style (enforced)
 
 - **Line width 120**, 4-space indent, LF endings, trailing newline at EOF.
-- **Quotes** governed by `double-quote-string-fixer` hook — follow existing file style; do not mix.
-- **f-strings** for formatting (no `%` or `.format()` unless necessary).
+- **Quotes**: single quotes, enforced by the Ruff formatter.
+- **Linting**: Ruff's `E`, `F`, and `W` rules for maintained source files.
 - **Imports**: Ruff's `I` rules, with `evalscope` detected as first-party and standard import sections.
+- **f-strings** for formatting (no `%` or `.format()` unless necessary).
 - **Type hints required** on every function signature.
 - **English only** for comments and docstrings.
 - **Public APIs need docstrings**; internal helpers only when intent is non-obvious.
@@ -80,14 +87,16 @@ run_task(TaskConfig(model='Qwen/Qwen2.5-0.5B-Instruct', datasets=['gsm8k'], limi
 | Handler function | `handle_` prefix |
 | Benchmark adapter file | `<name>_adapter.py` |
 
-**flake8 ignore list** (`setup.cfg`): `F401, F403, F405, F821, W503, E251, W504, F824, F541, E501, E226, E121-E129, E131, E741`. Do not expand — new ignores must be justified in the PR.
+**Ruff ignore list** (`pyproject.toml`): `E501, F401`. Do not expand — new ignores must be justified in the PR.
 
 ## Design rules
 
 - **Early returns** over nested conditionals.
 - **Minimal changes**: only touch code related to the current task; no drive-by cleanup.
 - **Pydantic-first**: cross-module data contracts use Pydantic models. Use `TaskConfig` / `Arguments` for configuration — never raw dicts at module boundaries.
+- **Web API responses**: successful JSON responses consumed by the dashboard use models from `evalscope/service/api_models/` and `json_response()`. Regenerate frontend contracts with `cd evalscope/web && npm run contracts:generate`; never hand-edit generated artifacts or add parallel response schemas.
 - **Reuse existing patterns**: new benchmarks / models / metrics go through existing registries and adapter base classes — no parallel mechanisms.
+- **Import direction**: `.importlinter` encodes the allowed direction between packages, checked by `make lint-imports` (a local check — it is not part of CI). Its `ignore_imports` lists are an explicit debt inventory of dependencies that exist today; do not append to them to silence a new violation. Nothing in the core (`api`, `evaluator`, `report`, `metrics`, `models`, `perf`) may import `evalscope.benchmarks` — that contract has no exemptions.
 - **DRY** but don't over-abstract just to remove minor duplication.
 
 ## Tests
@@ -98,7 +107,7 @@ run_task(TaskConfig(model='Qwen/Qwen2.5-0.5B-Instruct', datasets=['gsm8k'], limi
 
 ## Architecture pointers
 
-Don't try to learn the architecture from this file — read these and grep:
+Use the relevant source pointers below when the task touches that area; this is not a required reading list:
 
 | Topic | Source of truth |
 | --- | --- |
@@ -109,6 +118,7 @@ Don't try to learn the architecture from this file — read these and grep:
 | Model layer | `evalscope/api/model/model.py`, `evalscope/models/model_apis.py` |
 | CLI dispatch | `evalscope/cli/` |
 | Cache schema | `evalscope/api/evaluator/cache.py` |
+| Web API response contracts | `evalscope/service/api_models/`, `evalscope/service/responses.py`, `evalscope/web/src/api/generated/` |
 
 **Registry decorators**: `@register_benchmark`, `@register_model_api`, `@register_metric`, `@register_aggregation`, `@register_filter`, `@register_evaluator`.
 
@@ -123,7 +133,7 @@ Don't try to learn the architecture from this file — read these and grep:
 3. Reuse the standard dataset flow (`load_subset()` and existing `DataLoader` implementations) for shuffle, limit, repeats, filtering, conversion, and indexing. Override the full `load()` flow only when the standard loaders cannot represent the source format, and keep custom loading limited to benchmark-specific parsing or validation.
 4. Use `download_dataset_file()` or `download_dataset_snapshot()` for benchmark media and raw files; do not duplicate hub resolution, cache, path-safety, or download state inside an adapter.
 5. Decorate with `@register_benchmark(BenchmarkMeta(name=..., ...))`.
-6. Auto-discovered by globbing `evalscope/benchmarks/*/**/*_adapter.py`.
+6. Auto-discovered by globbing `evalscope/benchmarks/*/**/*_adapter.py`. Adapter modules are **loaded on demand**: `evalscope/benchmarks/_index.json` maps benchmark name → adapter module so a run imports only the adapters it uses. That file is **generated, never hand-edited** — run `make docs-update-index` (also run by `docs-update` / `docs-update-stats` / `docs-pipeline`) after adding, renaming or moving a benchmark. A name missing from the index still resolves by falling back to loading every adapter, so a stale index costs time, not correctness; `tests/api/test_benchmark_registry_contract.py` fails when it is out of date (run it locally — CI does not collect `tests/api/`).
 7. Add a smoke test.
 
 ### Evaluation versioning
@@ -155,7 +165,7 @@ An adapter must **never** call `self.llm_judge.judge()` or parse a judge reply i
 - `repeats`: duplicates items for k-metrics. `generation_config.n` is deprecated and mapped.
 - Use `generation_config` for runtime params. `TaskConfig.timeout` / `stream` are deprecated — forwarded with a warning.
 - `dataset_args` merges into `BenchmarkMeta._update()` (supports `local_path`, `filters` OrderedDict prepended).
-- Models are memoized by `(name, config, base_url, api_key, args)`.
+- Models are memoized by `(name, eval_type, config, base_url, api_key, args)`.
 - Use `@thread_safe` for model creation, `run_in_threads_with_progress` for concurrent eval.
 - Outputs land in `outputs/<timestamp>/{logs,predictions,reviews,reports,configs}/` (see `OutputsStructure`). `use_cache` resumes runs; `rerun_review` recomputes scores only.
 - `evalscope app` CLI command is **deprecated** (see `evalscope/cli/start_app.py`) — use `evalscope service` for the Web dashboard.
@@ -164,6 +174,6 @@ An adapter must **never** call `self.llm_judge.judge()` or parse a judge reply i
 
 ```bash
 make dev      # once
-make lint     # before every commit
+make lint     # apply fixes and run all checks before every commit
 pytest tests/cli/test_all.py::TestRun::test_ci_lite -v -s -p no:warnings
 ```

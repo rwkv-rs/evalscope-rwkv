@@ -48,16 +48,17 @@ to read values from measuring instruments. It covers both **real-world photograp
 """
 
 ANSWER_FORMAT_SUFFIX = (
-    '\nProvide your final answer on the last line in the format: Answer: <value> <unit>. '
-    'For example: Answer: 42.5 A'
+    '\nProvide your final answer on the last line in the format: Answer: <value> <unit>. For example: Answer: 42.5 A'
 )
 
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='measure_bench',
         pretty_name='MeasureBench',
         dataset_id='evalscope/MeasureBench',
+        hf_dataset_id='FlagEval/MeasureBench',
         tags=[Tags.MULTI_MODAL, Tags.REASONING, Tags.QA],
         description=DESCRIPTION,
         paper_url='https://arxiv.org/abs/2510.26865',
@@ -103,6 +104,7 @@ class MeasureBenchAdapter(VisionLanguageAdapter):
             image_b64 = self._image_bytes_to_base64(image_field['bytes'], default_format='jpeg')
         elif hasattr(image_field, 'save'):  # PIL Image fallback
             from evalscope.utils.io_utils import PIL_to_base64
+
             image_b64 = PIL_to_base64(image_field.convert('RGB'), format='JPEG', add_header=True)
         else:
             logger.warning(

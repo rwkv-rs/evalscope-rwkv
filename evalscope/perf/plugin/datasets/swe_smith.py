@@ -23,14 +23,15 @@ This plugin supports two data-source modes:
 
 import json
 import multiprocessing
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
+from evalscope.api.dataset import DatasetSource
 from evalscope.perf.arguments import Arguments
 from evalscope.perf.multi_turn_args import _get_range_upper
-from evalscope.perf.plugin.datasets.base import Conversation, DatasetPluginBase, Message, Messages, Turn
+from evalscope.perf.plugin.datasets.base import Conversation, DatasetPluginBase, Messages, Turn
 from evalscope.perf.plugin.datasets.dataset_args import MultiTurnDatasetArgs
 from evalscope.perf.plugin.datasets.utils import tokenize_chat_messages, truncate_text_to_token_len
 from evalscope.perf.plugin.registry import register_dataset
@@ -39,8 +40,6 @@ from evalscope.utils.logger import get_logger
 
 logger = get_logger()
 
-# Default ModelScope dataset used for live construction
-_DEFAULT_DATASET_NAME = 'SWE-bench/SWE-smith-trajectories'
 _DEFAULT_SPLIT = 'tool'
 
 # ---------------------------------------------------------------------------
@@ -225,7 +224,10 @@ def _to_turns(conversation: List[Dict]) -> Optional[Conversation]:
     messages_per_turn: List[Messages] = [turn.get('messages', []) for turn in conversation]
     if not messages_per_turn:
         return None
-    return [Turn(messages=m, is_final=(i == len(messages_per_turn) - 1)) for i, m in enumerate(messages_per_turn)]
+    rid = conversation[0].get('rid')
+    return [
+        Turn(messages=m, is_final=(i == len(messages_per_turn) - 1), rid=rid) for i, m in enumerate(messages_per_turn)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +276,10 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
     """
 
     args_schema = MultiTurnDatasetArgs
+    dataset_source = DatasetSource(
+        dataset_id='SWE-bench/SWE-smith-trajectories',
+        hf_dataset_id='SWE-bench/SWE-smith-trajectories',
+    )
 
     def __init__(self, query_parameters: Arguments):
         super().__init__(query_parameters)
@@ -360,7 +366,7 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
             f'target_count={target_count}, min_chars={min_chars}'
         )
 
-        dataset = self.load_hub_dataset(dataset_id=_DEFAULT_DATASET_NAME, split=_DEFAULT_SPLIT)
+        dataset = self.load_hub_dataset(split=_DEFAULT_SPLIT)
 
         candidates = []
         skipped_short = 0
@@ -383,8 +389,7 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
             candidates.append(messages)
 
         logger.info(
-            f'Pre-filter: {len(candidates)} candidates '
-            f'({skipped_short} too short, {skipped_parse} parse error)'
+            f'Pre-filter: {len(candidates)} candidates ({skipped_short} too short, {skipped_parse} parse error)'
         )
 
         np.random.shuffle(candidates)
@@ -399,13 +404,15 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
         for messages in candidates:
             sampled = self.get_sampled_multi_turn_params()
             num_turns = int(np.random.randint(min_turns, max_turns + 1))
-            work_items.append((
-                messages,
-                self.tokenizer,
-                sampled.get('first_turn_length', 65000),
-                sampled.get('subsequent_turn_length', 500),
-                num_turns,
-            ))
+            work_items.append(
+                (
+                    messages,
+                    self.tokenizer,
+                    sampled.get('first_turn_length', 65000),
+                    sampled.get('subsequent_turn_length', 500),
+                    num_turns,
+                )
+            )
 
         num_workers = resolve_dataset_generation_workers(
             args=self.query_parameters,
@@ -425,7 +432,7 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
         # possibly pre-warmed HF tokenizer (Rust Rayon threads). fork would inherit
         # these threads' lock states and deadlock on Pool cleanup.
         mp_ctx = multiprocessing.get_context('spawn')
-        pool_ctx = (mp_ctx.Pool(num_workers) if num_workers > 1 else None)
+        pool_ctx = mp_ctx.Pool(num_workers) if num_workers > 1 else None
 
         ctx = pool_ctx if pool_ctx is not None else _NullContext()
         with ctx as pool:
@@ -442,8 +449,7 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
                             pool.terminate()
                         break
 
-        logger.info(f'Built {len(conversations)} conversations '
-                    f'({skipped_build} skipped during build)')
+        logger.info(f'Built {len(conversations)} conversations ({skipped_build} skipped during build)')
 
         if conversations:
             all_turns = [len(conv) for conv in conversations]
@@ -451,15 +457,15 @@ class SweSmithDatasetPlugin(DatasetPluginBase):
             all_last_pt = [conv[-1]['prompt_tokens'] for conv in conversations]
             logger.info(
                 f'  Turns per conversation : min={min(all_turns)}, '
-                f'max={max(all_turns)}, avg={sum(all_turns)/len(all_turns):.1f}'
+                f'max={max(all_turns)}, avg={sum(all_turns) / len(all_turns):.1f}'
             )
             logger.info(
                 f'  First turn prompt tokens: min={min(all_first_pt)}, '
-                f'max={max(all_first_pt)}, avg={sum(all_first_pt)/len(all_first_pt):.0f}'
+                f'max={max(all_first_pt)}, avg={sum(all_first_pt) / len(all_first_pt):.0f}'
             )
             logger.info(
                 f'  Last  turn prompt tokens: min={min(all_last_pt)}, '
-                f'max={max(all_last_pt)}, avg={sum(all_last_pt)/len(all_last_pt):.0f}'
+                f'max={max(all_last_pt)}, avg={sum(all_last_pt) / len(all_last_pt):.0f}'
             )
 
         for conversation in conversations:

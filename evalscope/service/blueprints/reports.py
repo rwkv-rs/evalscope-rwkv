@@ -4,12 +4,13 @@ Exposes the file-system report data through a REST API so that the
 React SPA frontend can load reports, predictions and analyses without
 direct filesystem access.
 """
+
 import json
 import mimetypes
 import os
 import shutil
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import plotly.express as px
 import plotly.graph_objects as go
@@ -20,12 +21,37 @@ from pydantic import ValidationError
 from evalscope.constants import PLOTLY_CDN_URL, PLOTLY_THEME
 from evalscope.metrics.semantics import PrimaryMetricRef
 from evalscope.report import ReportKey, ReportRef, get_data_frame, get_report_list
+from evalscope.report.combinator import format_num_correct_for_display
+from evalscope.report.data_frames import (
+    get_acc_report_df,
+    get_compare_report_df,
+    get_comparison_quality_report_df,
+    get_model_prediction,
+    get_quality_metric_df,
+    get_quality_report_df,
+    get_report_analysis,
+    get_single_dataset_df,
+    load_multi_report_groups,
+    load_report_bundle,
+    normalize_score,
+    report_model_dir,
+    scan_report_refs,
+)
 from evalscope.report.report import Report
 from evalscope.report.visualization import (
     plot_multi_report_radar,
     plot_single_dataset_scores,
     plot_single_report_scores,
     plot_single_report_sunburst,
+)
+from evalscope.service.api_models import (
+    AnalysisResponse,
+    DataFrameResponse,
+    DeleteReportResponse,
+    ListReportsGroupedResponse,
+    ListReportsResponse,
+    LoadReportResponse,
+    PredictionsResponse,
 )
 from evalscope.service.report_meta_cache import (
     Fingerprint,
@@ -34,24 +60,12 @@ from evalscope.service.report_meta_cache import (
     prune_report_meta_cache,
     report_ref_fingerprint,
 )
-from evalscope.utils.data_utils import (
-    get_acc_report_df,
-    get_compare_report_df,
-    get_comparison_quality_report_df,
-    get_model_prediction,
-    get_quality_metric_df,
-    get_quality_report_df,
-    get_report_analysis,
-    load_multi_report_groups,
-    load_report_bundle,
-    normalize_score,
-    report_model_dir,
-    scan_report_refs,
-)
 from evalscope.utils.io_utils import OutputsStructure
 from evalscope.utils.logger import get_logger
+from evalscope.utils.uri_utils import sanitize_endpoint
 
-from ..utils import OUTPUT_DIR, active_task_ids
+from ..responses import json_response
+from ..utils import OUTPUT_DIR, active_task_ids, read_task_manifest
 
 logger = get_logger()
 
@@ -127,6 +141,7 @@ def serve_media_file() -> ResponseReturnValue:
 def _root_path() -> str:
     # Priority: URL query param > app config (from --outputs CLI arg) > default
     from flask import current_app
+
     return request.args.get('root_path', current_app.config.get('OUTPUTS_ROOT') or _DEFAULT_ROOT)
 
 
@@ -145,7 +160,7 @@ def _df_to_records(df) -> list:
     """Convert a pandas DataFrame to a list of dicts, handling NaN."""
     if df is None or df.empty:
         return []
-    return json.loads(df.to_json(orient='records', force_ascii=False))
+    return json.loads(df.to_json(orient='records', force_ascii=False, double_precision=15))
 
 
 def _parse_path_ref(run_id: str, model_id: str) -> ReportRef:
@@ -186,6 +201,8 @@ def _build_report_meta(ref: ReportRef, root: str) -> Optional[dict]:
 
     Reads only the report JSON files, never the run's YAML config: the list needs
     none of the config, and requiring it dropped config-less report directories.
+    The service-written task manifest is the single tolerated sidecar: it carries
+    the run's display identity (alias / endpoint) and is optional.
     """
     try:
         report_list = get_report_list([report_model_dir(root, ref)])
@@ -219,22 +236,89 @@ def _build_report_meta(ref: ReportRef, root: str) -> Optional[dict]:
             identity=metric.identity,
             score=metric.score,
             semantics=metric.semantics,
-        ) for r, metric in zip(report_list, primary_metrics) if metric
+        )
+        for r, metric in zip(report_list, primary_metrics)
+        if metric
     ]
-    return {
+    item = {
         'run_id': ref.run_id,
         'model_id': ref.model_id,
         'model_name': first.model_name,
-        'dataset_name': ', '.join(dataset_names) if len(dataset_names) > 1 else
-        (dataset_names[0] if dataset_names else ''),
-        'dataset_pretty_name': ', '.join(dataset_pretty_names) if len(dataset_pretty_names) > 1 else
-        (dataset_pretty_names[0] if dataset_pretty_names else ''),
+        'dataset_name': ', '.join(dataset_names)
+        if len(dataset_names) > 1
+        else (dataset_names[0] if dataset_names else ''),
+        'dataset_pretty_name': ', '.join(dataset_pretty_names)
+        if len(dataset_pretty_names) > 1
+        else (dataset_pretty_names[0] if dataset_pretty_names else ''),
         'num_samples': total_num,
         'timestamp': timestamp,
         'primary_metrics': [ref.model_dump(mode='json') for ref in primary_metric_refs],
         # Keep individual dataset names for per-dataset filtering.
         '_datasets': dataset_names,
     }
+    _enrich_with_task_identity(item, root, ref)
+    return item
+
+
+def _enrich_with_task_identity(item: dict, root: str, ref: ReportRef) -> None:
+    """Attach the run's alias and sanitized endpoint from its task manifest, when present.
+
+    The manifest is written by the service at task launch; CLI runs and older
+    outputs have none, in which case the item keeps no identity fields.
+    """
+    manifest = read_task_manifest(os.path.join(root, ref.run_id))
+    if not manifest:
+        return
+    alias = manifest.get('alias')
+    if isinstance(alias, str) and alias.strip():
+        item['alias'] = alias.strip()
+    endpoint = sanitize_endpoint(manifest.get('endpoint') or manifest.get('api_url'))
+    if endpoint:
+        item['api_host'] = endpoint
+
+
+def _group_items_by_model(items: List[dict]) -> List[dict]:
+    """Collapse per-report list items into one row per model, for display only.
+
+    This is a pure in-memory rollup over metadata `_build_report_meta` already
+    loaded - no report is read, written, moved, or merged, and no group ever
+    picks a "winning" source for a dataset that appears in more than one of
+    the model's reports. Every constituent report keeps its own identity
+    (`run_id`/`model_id`) and its own honestly-attributed `primary_metrics`;
+    the group only ever aggregates counts (`report_count`, `dataset_count`,
+    `num_samples`) and lists which reports it rolls up (`children`, `refs`).
+
+    Preserves `model_name`/`dataset_name`/`timestamp` keys with the same
+    meaning as a flat item so the existing sort machinery works unmodified.
+    """
+    order: List[str] = []
+    buckets: Dict[str, List[dict]] = {}
+    for it in items:
+        model_name = it['model_name']
+        if model_name not in buckets:
+            buckets[model_name] = []
+            order.append(model_name)
+        buckets[model_name].append(it)
+
+    groups: List[dict] = []
+    for model_name in order:
+        children = sorted(buckets[model_name], key=lambda c: c['timestamp'], reverse=True)
+        dataset_names = sorted({ds for child in children for ds in child['_datasets']})
+        stripped_children = [{k: v for k, v in child.items() if k != '_datasets'} for child in children]
+
+        groups.append(
+            {
+                'model_name': model_name,
+                'dataset_name': ', '.join(dataset_names),
+                'timestamp': children[0]['timestamp'],
+                'report_count': len(children),
+                'dataset_count': len(dataset_names),
+                'num_samples': sum(child['num_samples'] for child in children),
+                'refs': [f'{child["run_id"]}/{child["model_id"]}' for child in children],
+                'children': stripped_children,
+            }
+        )
+    return groups
 
 
 def _report_to_service_dict(report: Report) -> dict:
@@ -250,6 +334,7 @@ def _refresh_html_report(reports_dir: str) -> None:
 
     try:
         from evalscope.report import gen_html_report_file
+
         gen_html_report_file(reports_dir)
     except Exception as e:
         logger.warning(f'Failed to refresh report HTML after deletion, removing stale file: {e}')
@@ -288,8 +373,14 @@ def _apply_report_filters(items: List[dict], search: str, models_filter: str, da
     """Narrow the metadata list by fuzzy search, model set and dataset set."""
     if search:
         items = [
-            it for it in items if search in it['model_name'].lower() or search in it['dataset_name'].lower()
+            it
+            for it in items
+            if search in it['model_name'].lower()
+            or search in it['dataset_name'].lower()
             or search in it['dataset_pretty_name'].lower()
+            or search in str(it.get('alias') or '').lower()
+            or search in str(it.get('api_host') or '').lower()
+            or search in it['run_id'].lower()
         ]
     if models_filter:
         model_set = {m.strip().lower() for m in models_filter.split(';') if m.strip()}
@@ -301,14 +392,21 @@ def _apply_report_filters(items: List[dict], search: str, models_filter: str, da
 
 
 def _list_response(
-    page_items: List[dict], total: int, page: int, page_size: int, available_models: List[str],
-    available_datasets: List[str], fingerprints: List[Tuple[str, Fingerprint]], query_parts: List[str]
+    page_items: List[dict],
+    total: int,
+    page: int,
+    page_size: int,
+    available_models: List[str],
+    available_datasets: List[str],
+    fingerprints: List[Tuple[str, Fingerprint]],
+    query_parts: List[str],
+    grouped: bool = False,
 ) -> ResponseReturnValue:
     """Serialize the page with an ETag so unchanged responses revalidate as 304."""
     # Project internal keys into fresh dicts: meta objects are shared with the
     # cache, so mutating them here would corrupt later requests.
     response_reports = [{k: v for k, v in it.items() if k != '_datasets'} for it in page_items]
-    resp = jsonify({
+    payload = {
         'reports': response_reports,
         'total': total,
         'page': page,
@@ -317,7 +415,11 @@ def _list_response(
             'available_models': available_models,
             'available_datasets': available_datasets,
         },
-    })
+    }
+    if grouped:
+        resp = json_response(ListReportsGroupedResponse, payload)
+    else:
+        resp = json_response(ListReportsResponse, payload)
     resp.set_etag(list_etag(fingerprints, query_parts))
     resp.headers['Cache-Control'] = 'no-cache'
     return resp.make_conditional(request)
@@ -334,6 +436,9 @@ def list_reports() -> ResponseReturnValue:
         datasets   (str):   semicolon-separated dataset filter
         sort_by    (str):   model / dataset / time (default: time)
         sort_order (str):   asc / desc (default: desc)
+        group_by   (str):   'model' to roll same-model reports up into one row each
+                             (display only - no report is read, written, or merged);
+                             omit for the flat, one-row-per-report listing
         page       (int):   page number (default: 1)
         page_size  (int):   items per page (default: 20)
     """
@@ -343,13 +448,16 @@ def list_reports() -> ResponseReturnValue:
 
     removed_score_params = sorted({'score_min', 'score_max'} & set(request.args))
     if removed_score_params:
-        return jsonify({'error': f"unsupported query parameters: {', '.join(removed_score_params)}"}), 400
+        return jsonify({'error': f'unsupported query parameters: {", ".join(removed_score_params)}'}), 400
     sort_by = request.args.get('sort_by', 'time')
     sort_order = request.args.get('sort_order', 'desc')
+    group_by = request.args.get('group_by', '').strip().lower()
     if sort_by not in _SORT_KEYS:
         return jsonify({'error': f'unsupported sort_by: {sort_by}'}), 400
     if sort_order not in {'asc', 'desc'}:
         return jsonify({'error': f'unsupported sort_order: {sort_order}'}), 400
+    if group_by and group_by != 'model':
+        return jsonify({'error': f'unsupported group_by: {group_by}'}), 400
 
     try:
         items, fingerprints = _load_report_metas(root)
@@ -363,12 +471,15 @@ def list_reports() -> ResponseReturnValue:
         datasets_filter = request.args.get('datasets', '').strip()
         items = _apply_report_filters(items, search, models_filter, datasets_filter)
 
+        if group_by == 'model':
+            items = _group_items_by_model(items)
+
         items.sort(key=_SORT_KEYS[sort_by], reverse=sort_order == 'desc')
 
         page = max(1, request.args.get('page', 1, type=int))
         page_size = max(1, min(100, request.args.get('page_size', 20, type=int)))
         total = len(items)
-        page_items = items[(page - 1) * page_size:(page - 1) * page_size + page_size]
+        page_items = items[(page - 1) * page_size : (page - 1) * page_size + page_size]
 
         query_parts = [
             f'search={search}',
@@ -376,11 +487,20 @@ def list_reports() -> ResponseReturnValue:
             f'datasets={datasets_filter}',
             f'sort_by={sort_by}',
             f'sort_order={sort_order}',
+            f'group_by={group_by}',
             f'page={page}',
             f'page_size={page_size}',
         ]
         return _list_response(
-            page_items, total, page, page_size, available_models, available_datasets, fingerprints, query_parts
+            page_items,
+            total,
+            page,
+            page_size,
+            available_models,
+            available_datasets,
+            fingerprints,
+            query_parts,
+            grouped=group_by == 'model',
         )
     except Exception:
         logger.error('Failed to list reports', exc_info=True)
@@ -436,7 +556,14 @@ def delete_report(run_id: str, model_id: str) -> ResponseReturnValue:
         else:
             _refresh_html_report(reports_dir)
         logger.info(f'Deleted eval report {ref.key} under {run_dir}')
-        return jsonify({'success': True, 'run_id': ref.run_id, 'model_id': ref.model_id}), 200
+        return json_response(
+            DeleteReportResponse,
+            {
+                'success': True,
+                'run_id': ref.run_id,
+                'model_id': ref.model_id,
+            },
+        )
     except Exception:
         logger.error(f'Failed to delete report {ref.key}', exc_info=True)
         return jsonify({'error': 'Failed to delete report'}), 500
@@ -456,11 +583,14 @@ def load_report(run_id: str, model_id: str) -> ResponseReturnValue:
 
     try:
         report_list, datasets, task_cfg = load_report_bundle(_root_path(), ref)
-        return jsonify({
-            'report_list': [_report_to_service_dict(r) for r in report_list],
-            'datasets': datasets,
-            'task_config': task_cfg,
-        }), 200
+        return json_response(
+            LoadReportResponse,
+            {
+                'report_list': [_report_to_service_dict(r) for r in report_list],
+                'datasets': datasets,
+                'task_config': task_cfg,
+            },
+        )
     except FileNotFoundError as e:
         logger.warning(f'Report {ref.key} not found: {e}')
         return jsonify({'error': f'Report not found: {ref.key}'}), 404
@@ -496,15 +626,18 @@ def get_dataframe(run_id: str, model_id: str) -> ResponseReturnValue:
             if not dataset_name:
                 return jsonify({'error': 'dataset_name is required for view=dataset'}), 400
             report_df = get_data_frame(report_list=report_list, flatten_metrics=True, flatten_categories=True)
-            from evalscope.utils.data_utils import get_single_dataset_df
             df = get_single_dataset_df(report_df, dataset_name)
         else:
             df = acc_df
 
-        return jsonify({
-            'columns': list(df.columns),
-            'data': _df_to_records(df),
-        }), 200
+        format_num_correct_for_display(df)
+        return json_response(
+            DataFrameResponse,
+            {
+                'columns': list(df.columns),
+                'data': _df_to_records(df),
+            },
+        )
     except Exception:
         logger.error('Failed to get report table', exc_info=True)
         return jsonify({'error': 'Failed to get report table'}), 500
@@ -532,9 +665,12 @@ def get_predictions(run_id: str, model_id: str) -> ResponseReturnValue:
     try:
         work_dir = os.path.join(_root_path(), ref.run_id)
         df = get_model_prediction(work_dir, ref.model_id, dataset_name, subset_name)
-        return jsonify({
-            'predictions': _df_to_records(df),
-        }), 200
+        return json_response(
+            PredictionsResponse,
+            {
+                'predictions': _df_to_records(df),
+            },
+        )
     except Exception:
         logger.error('Failed to get predictions', exc_info=True)
         return jsonify({'error': 'Failed to get predictions'}), 500
@@ -560,7 +696,7 @@ def get_analysis(run_id: str, model_id: str) -> ResponseReturnValue:
     try:
         report_list, _, _ = load_report_bundle(_root_path(), ref)
         analysis = get_report_analysis(report_list, dataset_name)
-        return jsonify({'analysis': analysis}), 200
+        return json_response(AnalysisResponse, {'analysis': analysis})
     except Exception:
         logger.error('Failed to get analysis', exc_info=True)
         return jsonify({'error': 'Failed to get analysis'}), 500
@@ -586,10 +722,12 @@ def get_html_report(run_id: str) -> ResponseReturnValue:
         report_html = os.path.join(root, run_id, OutputsStructure.REPORTS_DIR, 'report.html')
 
         if not os.path.exists(report_html):
-            return jsonify({
-                'error': 'Report not yet generated',
-                'message': 'The HTML report has not been generated for this evaluation. It may still be in progress.',
-            }), 404
+            return jsonify(
+                {
+                    'error': 'Report not yet generated',
+                    'message': 'The HTML report has not been generated for this evaluation. It may still be in progress.',
+                }
+            ), 404
 
         return send_file(report_html, mimetype='text/html')
     except Exception:
@@ -600,9 +738,12 @@ def get_html_report(run_id: str) -> ResponseReturnValue:
 def _render_chart_html(fig: Optional[go.Figure]) -> Tuple[str, int, dict]:
     """Turn a figure into standalone Plotly HTML, or an empty-state page when there is nothing to plot."""
     if fig is None:
-        return '<html><body style="background:#0f172a;color:#94a3b8;display:flex;align-items:center;' \
-               'justify-content:center;height:100vh;font-family:sans-serif;">No data to plot</body></html>', \
-               200, {'Content-Type': 'text/html'}
+        return (
+            '<html><body style="background:#0f172a;color:#94a3b8;display:flex;align-items:center;'
+            'justify-content:center;height:100vh;font-family:sans-serif;">No data to plot</body></html>',
+            200,
+            {'Content-Type': 'text/html'},
+        )
 
     _apply_chart_theme(fig, request.args.get('theme', 'dark'))
     html = fig.to_html(full_html=True, include_plotlyjs=False, config={'responsive': True})
@@ -649,10 +790,7 @@ def get_compare_chart(chart_type: str) -> ResponseReturnValue:
             )
             fig.update_traces(
                 textposition='outside',
-                hovertemplate=(
-                    '%{x}<br>%{customdata[0]}: %{text}<br>Quality: %{y:.3f}'
-                    '<extra>%{fullData.name}</extra>'
-                ),
+                hovertemplate=('%{x}<br>%{customdata[0]}: %{text}<br>Quality: %{y:.3f}<extra>%{fullData.name}</extra>'),
             )
             fig.update_layout(
                 template=PLOTLY_THEME,
@@ -722,7 +860,6 @@ def get_chart(run_id: str, model_id: str, chart_type: str) -> ResponseReturnValu
                 if not dataset_name:
                     return jsonify({'error': 'dataset_name is required for dataset_scores'}), 400
                 report_df = get_data_frame(report_list=report_list, flatten_metrics=True, flatten_categories=True)
-                from evalscope.utils.data_utils import get_single_dataset_df
                 ds_df = get_single_dataset_df(report_df, dataset_name)
                 fig = plot_single_dataset_scores(get_quality_metric_df(report_list, ds_df))
             elif chart_type == 'scores':

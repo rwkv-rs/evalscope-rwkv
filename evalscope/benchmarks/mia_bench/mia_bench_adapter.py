@@ -30,6 +30,7 @@ def _build_grade_schema(component_weight: List[int]) -> Type[BaseModel]:
         name='mia_bench',
         pretty_name='MIA-Bench',
         dataset_id='lmms-lab/MIA-Bench',
+        hf_dataset_id='lmms-lab/MIA-Bench',
         tags=[Tags.MULTI_MODAL, Tags.INSTRUCTION_FOLLOWING, Tags.QA],
         description="""
 ## Overview
@@ -69,6 +70,7 @@ class MIABenchAdapter(VisionLanguageAdapter):
     Each sample is scored by an LLM judge that evaluates whether the model's
     response satisfies each weighted instruction component.
     """
+
     scoring_policy = ScoringPolicy.JUDGE_ONLY
 
     def __init__(self, **kwargs):
@@ -108,7 +110,7 @@ class MIABenchAdapter(VisionLanguageAdapter):
                     extracted_prediction=context.filtered_prediction,
                     prediction=context.original_prediction,
                     value={'judge_score': 0.0},
-                    main_score_name='judge_score'
+                    main_score_name='judge_score',
                 ),
                 reason='missing_components',
             )
@@ -116,13 +118,17 @@ class MIABenchAdapter(VisionLanguageAdapter):
 
         def request(case, placement, completed_cases, judge_context) -> JudgeRequest:
             from .utils import generate_mia_judge_prompt
+
             current = judge_context.task_state.metadata or {}
-            prompt = generate_mia_judge_prompt(
-                instruction=current.get('instruction', judge_context.task_state.input_text),
-                components=current.get('components', []),
-                component_weight=current.get('component_weight', []),
-                response=judge_context.filtered_prediction or judge_context.original_prediction,
-            ) + case.output_contract.instruction()
+            prompt = (
+                generate_mia_judge_prompt(
+                    instruction=current.get('instruction', judge_context.task_state.input_text),
+                    components=current.get('components', []),
+                    component_weight=current.get('component_weight', []),
+                    response=judge_context.filtered_prediction or judge_context.original_prediction,
+                )
+                + case.output_contract.instruction()
+            )
             return JudgeRequest(messages=[ChatMessageUser(content=prompt)])
 
         def reduce(case_verdicts, judge_context) -> ReducedVerdict:
@@ -141,5 +147,5 @@ class MIABenchAdapter(VisionLanguageAdapter):
             cases=[JudgeCase(case_id='grade', output_contract=contract)],
             request=request,
             reduce=reduce,
-            main_score_name='judge_score'
+            main_score_name='judge_score',
         )

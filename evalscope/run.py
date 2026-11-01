@@ -2,6 +2,7 @@
 """
 Run evaluation for LLMs.
 """
+
 import os
 from argparse import Namespace
 from typing import Dict, List, Union
@@ -29,6 +30,10 @@ def run_task(task_cfg: Union[str, dict, TaskConfig, List[TaskConfig], Namespace]
         return [run_task(cfg) for cfg in task_cfg]
 
     task_cfg = parse_task_config(task_cfg)
+    if task_cfg.dry_run:
+        logger.info('[dry-run] Parsed TaskConfig — skipping inference.')
+        logger.info(task_cfg)
+        return {}
     return run_single_task(task_cfg)
 
 
@@ -61,6 +66,7 @@ def shutdown_sandbox_service_if_enabled(task_cfg: TaskConfig) -> None:
 
     try:
         from evalscope.api.sandbox import shutdown_sandbox_service
+
         shutdown_sandbox_service()
     except Exception as exc:
         logger.warning(f'Failed to shut down sandbox service: {exc}')
@@ -86,6 +92,7 @@ def setup_work_directory(task_cfg: TaskConfig):
         task_cfg.eval_config['work_dir'] = task_cfg.work_dir
     elif task_cfg.eval_backend == EvalBackend.RAG_EVAL:
         from evalscope.backend.rag_eval import Tools
+
         eval_cfg = task_cfg.eval_config
         tool = getattr(eval_cfg, 'tool', '').lower()
         if tool == Tools.MTEB:
@@ -119,14 +126,17 @@ def get_backend_manager_class(eval_backend: EvalBackend):
     if eval_backend == EvalBackend.OPEN_COMPASS:
         logger.info('Using OpenCompassBackendManager')
         from evalscope.backend.opencompass import OpenCompassBackendManager
+
         return OpenCompassBackendManager
     elif eval_backend == EvalBackend.VLM_EVAL_KIT:
         logger.info('Using VLMEvalKitBackendManager')
         from evalscope.backend.vlm_eval_kit import VLMEvalKitBackendManager
+
         return VLMEvalKitBackendManager
     elif eval_backend == EvalBackend.RAG_EVAL:
         logger.info('Using RAGEvalBackendManager')
         from evalscope.backend.rag_eval import RAGEvalBackendManager
+
         return RAGEvalBackendManager
     elif eval_backend == EvalBackend.THIRD_PARTY:
         raise NotImplementedError(f'Not implemented for evaluation backend {eval_backend}')
@@ -137,7 +147,7 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
     from evalscope.api.evaluator import Evaluator
     from evalscope.api.model.lazy_model import LazyModel
     from evalscope.api.registry import create_evaluator, get_benchmark
-    from evalscope.report import gen_html_report_file, gen_perf_table, gen_table
+    from evalscope.report import Report, gen_html_report_file, gen_perf_table, gen_table
     from evalscope.utils.tqdm_utils import TqdmLogging as tqdm
     from evalscope.utils.tqdm_utils import make_tracker
 
@@ -168,23 +178,33 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
         evaluation_versions[dataset_name] = meta.evaluation_version
 
     evaluation_identity = build_evaluation_identity(resolved_benchmarks, evaluation_versions, task_config)
+    previous_snapshot = None
     if task_config.use_cache:
         snapshot_path = os.path.join(outputs.outputs_dir, OutputsStructure.CONFIGS_DIR, 'task_config.yaml')
+        previous_snapshot = load_task_config_snapshot(snapshot_path)
         cache_sources = validate_cached_evaluation_identity(
-            load_task_config_snapshot(snapshot_path),
+            previous_snapshot,
             evaluation_identity,
             task_config.rerun_review,
         )
         for benchmark_name, source in cache_sources.items():
             evaluation_identity.benchmarks[benchmark_name].cache_source = source
-            logger.warning(
-                f'Forcing prediction reuse for {benchmark_name} with rerun_review=True; '
-                f'previous identity is {source.fingerprint}.'
-            )
+            if task_config.rerun_review:
+                logger.warning(
+                    f'Forcing prediction reuse for {benchmark_name} with rerun_review=True; '
+                    f'previous identity is {source.fingerprint}.'
+                )
+        if task_config.rerun_review:
+            for identity in evaluation_identity.benchmarks.values():
+                identity.review_pending = True
+        if previous_snapshot and previous_snapshot.get('model_id') != task_config.model_id:
+            previous_snapshot = None
 
-    # dump task_cfg to outputs.configs_dir after creating evaluators
+    # Persist pending state before any review file can be replaced, including on forced same-identity reruns.
     task_config.dump_yaml(
-        outputs.configs_dir, build_generated_evaluation_metadata(resolved_benchmarks, evaluation_identity)
+        outputs.configs_dir,
+        build_generated_evaluation_metadata(resolved_benchmarks, evaluation_identity, previous_snapshot),
+        strict=True,
     )
     logger.info(task_config)
 
@@ -205,6 +225,16 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
         ) as pbar:
             for i, evaluator in enumerate(pbar):
                 res_dict = evaluator.eval()
+                identity = evaluation_identity.benchmarks[evaluator.benchmark_name]
+                if identity.review_pending and isinstance(res_dict, Report):
+                    identity.review_pending = False
+                    task_config.dump_yaml(
+                        outputs.configs_dir,
+                        build_generated_evaluation_metadata(
+                            resolved_benchmarks, evaluation_identity, previous_snapshot
+                        ),
+                        strict=True,
+                    )
                 eval_results[evaluator.benchmark_name] = res_dict
                 publication_metadata = os.environ.get('SCOREBOARD_PUBLICATION_METADATA')
                 if publication_metadata:
@@ -250,8 +280,10 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
         gc.collect()
 
         from evalscope.utils.import_utils import check_import
+
         if check_import('torch', raise_warning=False):
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -260,6 +292,7 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
 
 def main():
     from evalscope.arguments import parse_args
+
     args = parse_args()
     run_task(args)
 

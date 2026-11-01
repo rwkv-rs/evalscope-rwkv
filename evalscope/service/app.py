@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 """Flask service for EvalScope evaluation and performance testing."""
+
 import multiprocessing
 import os
 from datetime import datetime
@@ -7,8 +8,11 @@ from datetime import datetime
 from flask import Flask, jsonify, send_from_directory
 
 from evalscope.utils.logger import get_logger
+from evalscope.version import __version__
 
-from .blueprints import bp_eval, bp_perf, bp_reports
+from .api_models import ConfigResponse
+from .blueprints import bp_eval, bp_perf, bp_reports, bp_tasks
+from .responses import json_response
 from .utils import OUTPUT_DIR as _DEFAULT_ROOT
 
 logger = get_logger()
@@ -41,6 +45,7 @@ def create_app(outputs: str = None):
     # --- CORS (development convenience) -----------------------------------
     try:
         from flask_cors import CORS
+
         CORS(app)
     except ImportError:
         pass  # flask-cors not installed; same-origin only
@@ -49,6 +54,7 @@ def create_app(outputs: str = None):
     app.register_blueprint(bp_eval)
     app.register_blueprint(bp_perf)
     app.register_blueprint(bp_reports)
+    app.register_blueprint(bp_tasks)
 
     @app.route('/health', methods=['GET'])
     def health_check():
@@ -59,9 +65,13 @@ def create_app(outputs: str = None):
     def get_config():
         """Return runtime configuration for the frontend."""
         outputs_root = app.config.get('OUTPUTS_ROOT')
-        return jsonify({
-            'outputs_root': outputs_root or _DEFAULT_ROOT,
-        })
+        return json_response(
+            ConfigResponse,
+            {
+                'outputs_root': outputs_root or _DEFAULT_ROOT,
+                'version': __version__,
+            },
+        )
 
     # --- SPA static-file serving ------------------------------------------
     if os.path.isdir(_WEB_DIST):
@@ -77,41 +87,44 @@ def create_app(outputs: str = None):
 
     @app.errorhandler(404)
     def not_found(error):
-        return jsonify({
-            'error': 'Endpoint not found',
-            'available_endpoints': {
-                'GET  /health': 'Health check',
-                'GET  /api/v1/config': 'Get runtime configuration',
-                'GET  /api/v1/reports/media/file': 'Serve a local media file (image/audio/video) by path',
-                'POST /api/v1/eval/invoke': 'Run model evaluation task (blocking)',
-                'GET  /api/v1/eval/benchmarks': 'List supported benchmarks with descriptions',
-                'GET  /api/v1/eval/log': 'Get evaluation log',
-                'GET  /api/v1/eval/progress': 'Get real-time evaluation progress',
-                'GET  /api/v1/eval/report': 'Get HTML evaluation report',
-                'POST /api/v1/eval/resume/invoke': 'Resume a previous evaluation (blocking)',
-                'POST /api/v1/perf/invoke': 'Run performance benchmark task (blocking)',
-                'GET  /api/v1/perf/log': 'Get performance benchmark log',
-                'GET  /api/v1/perf/progress': 'Get real-time performance benchmark progress',
-                'GET  /api/v1/perf/report': 'Get HTML performance benchmark report',
-                'GET  /api/v1/perf/list': 'List historical performance benchmark runs',
-                'GET  /api/v1/perf/detail': 'Get native metadata for a perf run',
-                'GET  /api/v1/perf/runs': 'List individual runs within a perf run',
-                'GET  /api/v1/perf/requests': 'Get paginated per-request records (DB) for a run',
-                'GET  /api/v1/perf/chart': 'Render a single perf chart (Plotly HTML)',
-                'GET  /api/v1/perf/compare/chart': 'Overlay a sweep metric across multiple perf runs',
-                'GET  /api/v1/perf/history/report': 'Get HTML report for a historical perf run',
-                'DELETE /api/v1/perf/run': 'Delete a historical perf run directory',
-                'GET  /api/v1/reports': 'Filterable, paginated report listing',
-                'GET  /api/v1/reports/runs/<run_id>/models/<model_id>': 'Load a single model report',
-                'DELETE /api/v1/reports/runs/<run_id>/models/<model_id>': 'Delete an evaluation report from disk',
-                'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/table': 'Get report data as JSON table',
-                'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/predictions': 'Get model predictions',
-                'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/analysis': 'Get AI analysis text',
-                'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/charts/<chart_type>': 'Render a single-report chart',  # noqa: E501
-                'GET  /api/v1/reports/runs/<run_id>/html': 'Get HTML report file',
-                'GET  /api/v1/reports/charts/<chart_type>': 'Render a multi-report comparison chart',
+        return jsonify(
+            {
+                'error': 'Endpoint not found',
+                'available_endpoints': {
+                    'GET  /health': 'Health check',
+                    'GET  /api/v1/config': 'Get runtime configuration',
+                    'GET  /api/v1/reports/media/file': 'Serve a local media file (image/audio/video) by path',
+                    'POST /api/v1/eval/invoke': 'Run model evaluation task (blocking)',
+                    'GET  /api/v1/eval/benchmarks': 'List supported benchmarks with descriptions',
+                    'GET  /api/v1/eval/log': 'Get evaluation log',
+                    'GET  /api/v1/eval/progress': 'Get real-time evaluation progress',
+                    'GET  /api/v1/eval/report': 'Get HTML evaluation report',
+                    'POST /api/v1/eval/resume/invoke': 'Resume a previous evaluation (blocking)',
+                    'POST /api/v1/perf/invoke': 'Run performance benchmark task (blocking)',
+                    'GET  /api/v1/perf/log': 'Get performance benchmark log',
+                    'GET  /api/v1/perf/progress': 'Get real-time performance benchmark progress',
+                    'GET  /api/v1/perf/report': 'Get HTML performance benchmark report',
+                    'GET  /api/v1/perf/list': 'List historical performance benchmark runs',
+                    'GET  /api/v1/perf/detail': 'Get native metadata for a perf run',
+                    'GET  /api/v1/perf/runs': 'List individual runs within a perf run',
+                    'GET  /api/v1/perf/requests': 'Get paginated per-request records (DB) for a run',
+                    'GET  /api/v1/perf/chart': 'Render a single perf chart (Plotly HTML)',
+                    'GET  /api/v1/perf/compare/chart': 'Overlay a sweep metric across multiple perf runs',
+                    'GET  /api/v1/perf/history/report': 'Get HTML report for a historical perf run',
+                    'DELETE /api/v1/perf/run': 'Delete a historical perf run directory',
+                    'GET  /api/v1/tasks/active': 'List currently running tasks',
+                    'GET  /api/v1/reports': 'Filterable, paginated report listing',
+                    'GET  /api/v1/reports/runs/<run_id>/models/<model_id>': 'Load a single model report',
+                    'DELETE /api/v1/reports/runs/<run_id>/models/<model_id>': 'Delete an evaluation report from disk',
+                    'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/table': 'Get report data as JSON table',
+                    'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/predictions': 'Get model predictions',
+                    'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/analysis': 'Get AI analysis text',
+                    'GET  /api/v1/reports/runs/<run_id>/models/<model_id>/charts/<chart_type>': 'Render a single-report chart',  # noqa: E501
+                    'GET  /api/v1/reports/runs/<run_id>/html': 'Get HTML report file',
+                    'GET  /api/v1/reports/charts/<chart_type>': 'Render a multi-report comparison chart',
+                },
             }
-        }), 404
+        ), 404
 
     @app.errorhandler(500)
     def internal_error(error):

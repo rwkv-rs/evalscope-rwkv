@@ -78,13 +78,14 @@ SUBJECT_MAPPING = {
     'traditional_chinese_medicine': ['china specific', 'China specific'],
     'virology': ['biology', 'STEM'],
     'world_history': ['history', 'Humanities'],
-    'world_religions': ['global', 'Humanities']
+    'world_religions': ['global', 'Humanities'],
 }
 
 
 @register_benchmark(
     BenchmarkMeta(
         name='cmmlu',
+        supports_choice=True,
         pretty_name='C-MMLU',
         tags=[Tags.KNOWLEDGE, Tags.MULTIPLE_CHOICE, Tags.CHINESE],
         description="""
@@ -129,7 +130,6 @@ C-MMLU (Chinese Massive Multitask Language Understanding) is a comprehensive Chi
     )
 )
 class CMMLUAdapter(MultiChoiceAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

@@ -14,9 +14,16 @@ from evalscope.utils.logger import get_logger
 logger = get_logger()
 
 SUBSET_LIST = [
-    'Regular Text Recognition', 'Irregular Text Recognition', 'Artistic Text Recognition', 'Handwriting Recognition',
-    'Digit String Recognition', 'Non-Semantic Text Recognition', 'Scene Text-centric VQA', 'Doc-oriented VQA',
-    'Key Information Extraction', 'Handwritten Mathematical Expression Recognition'
+    'Regular Text Recognition',
+    'Irregular Text Recognition',
+    'Artistic Text Recognition',
+    'Handwriting Recognition',
+    'Digit String Recognition',
+    'Non-Semantic Text Recognition',
+    'Scene Text-centric VQA',
+    'Doc-oriented VQA',
+    'Key Information Extraction',
+    'Handwritten Mathematical Expression Recognition',
 ]
 
 
@@ -55,6 +62,7 @@ OCRBench is a comprehensive evaluation benchmark designed to assess the OCR (Opt
 - Comprehensive test of OCR capabilities in multimodal models
 """,
         dataset_id='evalscope/OCRBench',
+        hf_dataset_id='echo840/OCRBench',
         subset_list=SUBSET_LIST,
         metric_list=['acc'],
         eval_split='test',
@@ -62,7 +70,6 @@ OCRBench is a comprehensive evaluation benchmark designed to assess the OCR (Opt
     )
 )
 class OCRBenchAdapter(VisionLanguageAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.reformat_subset = True
@@ -83,7 +90,7 @@ class OCRBenchAdapter(VisionLanguageAdapter):
             metadata={
                 'dataset': record.get('dataset'),
                 'question_type': record.get('question_type'),
-            }
+            },
         )
 
     def match_score(

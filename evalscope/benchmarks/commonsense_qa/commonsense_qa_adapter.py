@@ -40,6 +40,7 @@ CommonsenseQA is a benchmark for evaluating AI models' ability to answer questio
         tags=[Tags.REASONING, Tags.COMMONSENSE, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/commonsense-qa',
+        hf_dataset_id='extraordinarylab/commonsense-qa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split=None,
@@ -48,7 +49,6 @@ CommonsenseQA is a benchmark for evaluating AI models' ability to answer questio
     )
 )
 class CommonsenseQAAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
             input=record['question'],

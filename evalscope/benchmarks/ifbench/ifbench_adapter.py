@@ -7,6 +7,7 @@ from evalscope.api.messages import ChatMessageUser
 from evalscope.api.metric import Score
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import Tags
+from evalscope.metrics.aggregators import METRIC_WEIGHTS_KEY
 from evalscope.utils.import_utils import check_import
 from evalscope.utils.logger import get_logger
 
@@ -41,11 +42,13 @@ IFBench is a benchmark designed to evaluate how reliably AI models follow novel,
 
 - Default configuration uses **0-shot** evaluation
 - Metrics: prompt_level_strict, inst_level_strict, prompt_level_loose, inst_level_loose
+- `inst_level_*` pools every instruction in the dataset, matching the official micro-average
 - Requires emoji, syllapy packages
 - Evaluates both strict and loose constraint satisfaction
 """,  # noqa: E501
         tags=[Tags.INSTRUCTION_FOLLOWING],
         dataset_id='allenai/IFBench_test',
+        hf_dataset_id='allenai/IFBench_test',
         subset_list=['default'],
         metric_list=[
             'prompt_level_strict',
@@ -54,13 +57,14 @@ IFBench is a benchmark designed to evaluate how reliably AI models follow novel,
             'inst_level_loose',
         ],
         primary_metric='prompt_level_strict',
+        aggregation='weighted_mean',
+        evaluation_version='v1.2',
         few_shot_num=0,
         train_split=None,
         eval_split='train',
     )
 )
 class IFBenchAdapter(DefaultDataAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -93,6 +97,12 @@ class IFBenchAdapter(DefaultDataAdapter):
             # Process results using the existing ifeval utility
             results = process_results(doc, [filtered_prediction])
             score.value.update(results)
+
+            instruction_count = len(doc.get('instruction_id_list') or [])
+            score.metadata[METRIC_WEIGHTS_KEY] = {
+                'inst_level_strict': instruction_count,
+                'inst_level_loose': instruction_count,
+            }
 
             # Set main score name
             score.main_score_name = 'prompt_level_strict'

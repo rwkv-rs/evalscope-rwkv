@@ -41,6 +41,7 @@ MathQA is a large-scale dataset for mathematical word problem solving, gathered 
         tags=[Tags.REASONING, Tags.MATH, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/math-qa',
+        hf_dataset_id='extraordinarylab/math-qa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split=None,
@@ -49,7 +50,6 @@ MathQA is a large-scale dataset for mathematical word problem solving, gathered 
     )
 )
 class MathQAAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
             input=record['question'],

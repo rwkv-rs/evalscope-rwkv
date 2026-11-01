@@ -49,6 +49,7 @@ Answer the following multiple choice question. The entire content of your respon
         tags=[Tags.REASONING, Tags.MULTIPLE_CHOICE],
         description=DESCRIPTION.strip(),
         dataset_id='extraordinarylab/logiqa',
+        hf_dataset_id='extraordinarylab/logiqa',
         metric_list=['acc'],
         few_shot_num=0,
         train_split='validation',
@@ -57,10 +58,9 @@ Answer the following multiple choice question. The entire content of your respon
     )
 )
 class LogiQAAdapter(MultiChoiceAdapter):
-
     def record_to_sample(self, record) -> Sample:
         return Sample(
-            input=f"{record['context']}\n{record['question']}",
+            input=f'{record["context"]}\n{record["question"]}',
             choices=record['choices'],
             target=record['answer'],
             metadata={},

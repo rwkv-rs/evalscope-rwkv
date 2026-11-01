@@ -25,6 +25,7 @@ Please think step by step. After your reasoning, put your final answer within \\
 
 @register_benchmark(
     BenchmarkMeta(
+        evaluation_version='v1.1',
         name='gsm8k_v',
         pretty_name='GSM8K-V',
         dataset_id='evalscope/GSM8K-V',
@@ -59,16 +60,11 @@ GSM8K-V is a purely visual multi-image mathematical reasoning benchmark that sys
 """,  # noqa: E501
         subset_list=['default'],
         eval_split='train',
-        metric_list=[{
-            'acc': {
-                'numeric': True
-            }
-        }],
+        metric_list=[{'acc': {'numeric': True}}],
         prompt_template=PROMPT_TEMPLATE,
     )
 )
 class GSM8KVAdapter(VisionLanguageAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -92,8 +88,8 @@ class GSM8KVAdapter(VisionLanguageAdapter):
                 'index': record['index'],
                 'category': record['category'],
                 'subcategory': record['subcategory'],
-                'original_question': record['original_question']
-            }
+                'original_question': record['original_question'],
+            },
         )
 
     def extract_answer(self, prediction: str, task_state: TaskState):

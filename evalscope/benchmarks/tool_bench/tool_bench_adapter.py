@@ -52,6 +52,7 @@ ToolBench-Static is a benchmark for evaluating AI models' ability to use tools a
         metric_list=['Act.EM', 'Plan.EM', 'F1', 'HalluRate', 'Rouge-L'],
         primary_metric=MetricSelector(name='f1', aggregation='mean'),
         eval_split='test',
+        evaluation_version='v1.1',
     )
 )
 class ToolBenchAdapter(DefaultDataAdapter):
@@ -85,11 +86,7 @@ class ToolBenchAdapter(DefaultDataAdapter):
         return Sample(
             input=processed_messages,
             target='',  # Store the full record as target for evaluation
-            metadata={
-                'target': record['target'],
-                'tools': record['tools'],
-                'messages': record['messages']
-            }
+            metadata={'target': record['target'], 'tools': record['tools'], 'messages': record['messages']},
         )
 
     def match_score(

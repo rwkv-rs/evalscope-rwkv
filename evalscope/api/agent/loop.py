@@ -232,8 +232,7 @@ class AgentLoop:
         """
         self._dbg(
             ctx,
-            f'executing {len(parsed.tool_calls)} tool call(s): '
-            f'{[c.function.name for c in parsed.tool_calls]}',
+            f'executing {len(parsed.tool_calls)} tool call(s): {[c.function.name for c in parsed.tool_calls]}',
         )
         attachment_messages = []
         for call in parsed.tool_calls:
@@ -252,7 +251,7 @@ class AgentLoop:
             observation_text = rich_output.text if rich_output is not None else observation
             self._dbg(
                 ctx,
-                f'tool={call.function.name} duration={duration*1000:.0f}ms '
+                f'tool={call.function.name} duration={duration * 1000:.0f}ms '
                 f'error={error.type if error else None} '
                 f'obs_len={len(observation_text)}',
             )
@@ -360,9 +359,10 @@ class AgentLoop:
         """Record the strategy's own termination signal.
 
         ``final_answer`` here is what the *loop observed*, not the prediction
-        that gets reported: that is resolved after the loop returns and lives
-        in ``AgentTrace.final_prediction``. The two coincide for the sentinel
-        protocol but must not be conflated.
+        that gets reported: that is resolved after the loop returns by the
+        adapter's ``_extract_final_answer`` hook and lands in
+        ``InferenceResult.output.completion``. The two coincide for the
+        sentinel protocol but must not be conflated.
         """
         self._dbg(
             ctx,
@@ -382,7 +382,9 @@ class AgentLoop:
         The loop deliberately does not publish a ``final_answer`` here: it has
         no answer of its own, and a malformed turn's ``raw_text`` is incidental
         prose rather than a submission. Only a short preview is kept, for
-        diagnosis; the reported prediction is ``AgentTrace.final_prediction``.
+        diagnosis; the reported prediction is resolved after the loop returns
+        by the adapter's ``_extract_final_answer`` hook and lands in
+        ``InferenceResult.output.completion``.
         """
         malformed = parsed.outcome is TurnOutcome.MALFORMED
         self.trace.add_event(
@@ -422,13 +424,11 @@ class AgentLoop:
         )
         self._dbg(
             ctx,
-            f'is_done after tool {call.function.name}; '
-            f'final_answer_len={len(str(parsed.final_answer or ""))}',
+            f'is_done after tool {call.function.name}; final_answer_len={len(str(parsed.final_answer or ""))}',
         )
 
     def _emit_max_steps_exceeded(self, ctx: AgentContext) -> None:
-        logger.info(f'AgentLoop reached max_steps={self.max_steps} '
-                    f'for sample {ctx.sample_id}; terminating.')
+        logger.info(f'AgentLoop reached max_steps={self.max_steps} for sample {ctx.sample_id}; terminating.')
         if logger.isEnabledFor(logging.DEBUG):
             self._dbg(ctx, f'max_steps_exceeded total_messages={len(ctx.messages)}')
         self.trace.add_event(
@@ -442,8 +442,7 @@ class AgentLoop:
 
     def _emit_context_overflow(self, ctx: AgentContext) -> None:
         logger.warning(
-            f'AgentLoop sample={ctx.sample_id} step={ctx.step}: '
-            'model context window exceeded; terminating gracefully.'
+            f'AgentLoop sample={ctx.sample_id} step={ctx.step}: model context window exceeded; terminating gracefully.'
         )
         if logger.isEnabledFor(logging.DEBUG):
             self._dbg(ctx, f'context_overflow total_messages={len(ctx.messages)}')

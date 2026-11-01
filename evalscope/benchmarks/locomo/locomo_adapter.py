@@ -100,12 +100,14 @@ class LoCoMoAdapter(DefaultDataAdapter):
             conversation = conversation_record['conversation']
             sample_id = conversation_record['sample_id']
             for qa_index, qa in enumerate(conversation_record['qa']):
-                records.append({
-                    'sample_id': sample_id,
-                    'qa_index': qa_index,
-                    'conversation': conversation,
-                    'qa': qa,
-                })
+                records.append(
+                    {
+                        'sample_id': sample_id,
+                        'qa_index': qa_index,
+                        'conversation': conversation,
+                        'qa': qa,
+                    }
+                )
         return records
 
     def _resolve_dataset_file(self) -> str:
@@ -120,6 +122,7 @@ class LoCoMoAdapter(DefaultDataAdapter):
         return DatasetHub(
             data_id_or_path=self.dataset_id,
             data_source=self.dataset_hub,
+            revision=self.dataset_revision,
             force_redownload=self.force_redownload,
             cache_dir=self.dataset_dir,
         ).download_file(DATA_FILE)

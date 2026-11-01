@@ -49,6 +49,7 @@ opencompass      = {file = ["requirements/opencompass.txt"]}
 vlmeval          = {file = ["requirements/vlmeval.txt"]}
 rag              = {file = ["requirements/rag.txt"]}
 perf             = {file = ["requirements/perf.txt"]}
+agentx           = {file = ["requirements/perf.txt", "requirements/agentx.txt"]}
 app              = {file = ["requirements/app.txt"]}
 aigc             = {file = ["requirements/aigc.txt"]}
 sandbox          = {file = ["requirements/sandbox.txt"]}
@@ -81,7 +82,9 @@ terminal_bench   = {file = ["evalscope/benchmarks/terminal_bench/requirements.tx
 deep_swe         = {file = ["evalscope/benchmarks/deep_swe/requirements.txt"]}
 toolathlon       = {file = ["evalscope/benchmarks/toolathlon/requirements.txt"]}
 bfcl             = {file = ["evalscope/benchmarks/bfcl/requirements.txt"]}
+agentdojo        = {file = ["evalscope/benchmarks/agentdojo/requirements.txt"]}
 wide_search      = {file = ["evalscope/benchmarks/wide_search/requirements.txt"]}
+vtcbench         = {file = ["evalscope/benchmarks/vtcbench/requirements.txt"]}
 all = {file = [
   "requirements/opencompass.txt",
   "requirements/vlmeval.txt",
@@ -102,13 +105,35 @@ addopts = "-s -v"
 [tool.ruff]
 include = [
   "pyproject.toml",
+  "*.py",
   "evalscope/**/*.py",
+  "tools/**/*.py",
   "tests/**/*.py",
 ]
-extend-exclude = ["docs", "examples", "scripts"]
+extend-exclude = [
+  "docs",
+  "examples",
+  "evalscope/utils/utils.py",
+  "evalscope/third_party",
+  "evalscope/backend/rag_eval/clip_benchmark/tasks",
+  "evalscope/backend/rag_eval/cmteb/tasks",
+  "evalscope/metrics/vision/t2v_metrics",
+]
 force-exclude = true
 line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["I"]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E402"]
+"__init__.py" = ["F401"]
+"!evalscope/{utils,cli,report,perf}/**/*.py" = ["F401"]
+
+[tool.ruff.format]
+exclude = ["tests/**/*.py"]
+indent-style = "space"
+line-ending = "lf"
+quote-style = "single"

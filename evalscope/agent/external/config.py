@@ -40,6 +40,9 @@ class ExternalAgentFramework:
     HERMES = 'hermes'
     """Nous Research's ``hermes`` agent (uses OpenAI Chat Completions API)."""
 
+    DEEPSEEK_HARNESS = 'deepseek-harness'
+    """DeepSeek Harness's ``dsh`` headless profile (uses OpenAI Chat Completions API)."""
+
 
 class BridgeConfig(BaseModel):
     """Knobs for the reverse-proxy bridge that sits between an external
@@ -83,5 +86,6 @@ class ExternalAgentConfig(BaseAgentConfig):
     @classmethod
     def _validate_framework(cls, v: str) -> str:
         from evalscope.api.registry import get_runner
+
         get_runner(v)  # raises ValueError with available list on typo
         return v

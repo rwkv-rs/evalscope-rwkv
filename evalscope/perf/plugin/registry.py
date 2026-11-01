@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, List, Type, Union
+from typing import TYPE_CHECKING, List, Type, Union
 
 if TYPE_CHECKING:
     from .api import ApiPluginBase
@@ -54,6 +54,7 @@ def register_api(name: Union[str, List[str]]):
 
 class DatasetRegistry(PluginRegistry):
     """Registry for dataset plugins."""
+
     _registry = {}
 
     @classmethod
@@ -65,6 +66,7 @@ class DatasetRegistry(PluginRegistry):
 
 class ApiRegistry(PluginRegistry):
     """Registry for API plugins."""
+
     _registry = {}
 
     @classmethod

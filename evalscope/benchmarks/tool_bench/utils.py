@@ -17,7 +17,7 @@ def evaluate_action_em(cand_list: list, ref_list: list):
         return 0
     em = 0
     for cand, ref in zip(cand_list, ref_list):
-        em += (1 if cand == ref else 0)
+        em += 1 if cand == ref else 0
     return em / len(cand_list)
 
 
@@ -77,10 +77,10 @@ def evaluate_action_input_f1(action_pred: list, action_ref: list, cand_list: lis
             except Exception:
                 pass
 
-    # 检查列表是否为空，如果为空则返回0
-    easy_f1_avg = sum(easy_f1) / len(easy_f1) if easy_f1 else 0
-    hard_f1_avg = sum(hard_f1) / len(hard_f1) if hard_f1 else 0
-    f1_avg = sum(f1) / len(f1) if f1 else 0
+    # None (not 0) for an empty list: the metric does not apply to this step and must not be averaged in.
+    easy_f1_avg = sum(easy_f1) / len(easy_f1) if easy_f1 else None
+    hard_f1_avg = sum(hard_f1) / len(hard_f1) if hard_f1 else None
+    f1_avg = sum(f1) / len(f1) if f1 else None
 
     return easy_f1_avg, hard_f1_avg, f1_avg
 
@@ -90,13 +90,13 @@ def parse_action(text):
     action_input = '{}'
     if 'Action Input:' in text:
         input_idx = text.rindex('Action Input:')
-        action_input = text[input_idx + len('Action Input:'):].strip()
+        action_input = text[input_idx + len('Action Input:') :].strip()
     else:
         action_input = '{}'
 
     if 'Action:' in text:
         action_idx = text.rindex('Action:')
-        action = text[action_idx + len('Action:'):].strip()
+        action = text[action_idx + len('Action:') :].strip()
         if 'Action Input:' in action:
             input_idx = action.index('Action Input:')
             action = action[:input_idx].strip()
@@ -187,17 +187,16 @@ def calculate_metrics(data):
         else:
             action_input_pred.append(pred_input)
 
-    metric = {}
-    rouge = evaluate_rougel(answer_pred, answer_ref)
-    plan_em = evaluate_action_em(cand_list=plan_pred, ref_list=plan_ref)
-    action_em = evaluate_action_em(cand_list=action_pred, ref_list=action_ref)
+    # The official scorer averages Act.EM/F1 over 'call' steps and Rouge-L over 'finish' steps only,
+    # so emit each metric only for the steps it applies to instead of a 0 that dilutes the mean.
     easy_f1, hard_f1, f1 = evaluate_action_input_f1(action_pred, action_ref, action_input_pred, action_input_ref)
-    hallu_rate = hallu_pred
-    metric['Act.EM'] = action_em
-    metric['F1'] = f1
-    metric['HalluRate'] = hallu_rate
-    metric['plan_em'] = plan_em
-    metric['Easy_F1'] = easy_f1
-    metric['Hard_F1'] = hard_f1
-    metric['Rouge-L'] = rouge
-    return metric
+    metric = {
+        'Act.EM': evaluate_action_em(cand_list=action_pred, ref_list=action_ref) if action_ref else None,
+        'F1': f1,
+        'HalluRate': hallu_pred,
+        'plan_em': evaluate_action_em(cand_list=plan_pred, ref_list=plan_ref),
+        'Easy_F1': easy_f1,
+        'Hard_F1': hard_f1,
+        'Rouge-L': evaluate_rougel(answer_pred, answer_ref) if answer_ref else None,
+    }
+    return {k: v for k, v in metric.items() if v is not None}

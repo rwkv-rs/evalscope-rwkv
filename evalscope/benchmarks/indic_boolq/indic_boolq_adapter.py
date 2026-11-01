@@ -57,6 +57,7 @@ languages plus English, for evaluating multilingual passage understanding.
 - All languages ship in a single dataset config; this adapter reformats by the `language` field
 """,
         dataset_id='sarvamai/boolq-indic',
+        hf_dataset_id='sarvamai/boolq-indic',
         metric_list=['acc'],
         subset_list=SUBSET_LIST,
         few_shot_num=0,
@@ -66,7 +67,6 @@ languages plus English, for evaluating multilingual passage understanding.
     )
 )
 class IndicBoolQAdapter(MultiChoiceAdapter):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.reformat_subset = True
@@ -80,7 +80,7 @@ class IndicBoolQAdapter(MultiChoiceAdapter):
         # scaffold stays in English, matching the source dataset's own convention (its `question`
         # field never carries a trailing "?" or a language-local equivalent of "Question:").
         return Sample(
-            input=f"{record['passage']}\n\nQuestion: {record['question']}?",
+            input=f'{record["passage"]}\n\nQuestion: {record["question"]}?',
             choices=['Yes', 'No'],
             target=target_letter,
             subset_key=language,
