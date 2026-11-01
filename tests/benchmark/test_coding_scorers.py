@@ -233,3 +233,55 @@ def test_scicode_preserves_subproblem_order() -> None:
 ])
 def test_changed_scoring_has_new_evaluation_version(make_adapter: Callable[..., Any], name: str, version: str) -> None:
     assert make_adapter(name).benchmark_meta.evaluation_version == version
+
+
+def _humaneval_state(content: str, stop_reason: str):
+    from evalscope.api.dataset import Sample
+    from evalscope.api.evaluator import TaskState
+    from evalscope.api.model import ModelOutput
+
+    sample = Sample(input='q', target='', metadata={
+        'task_id': 'T/0', 'entry_point': 'answer', 'prompt': '',
+        'test': 'def check(candidate):\n    assert candidate() == 42\n',
+    })
+    return TaskState(
+        model='m', sample=sample, completed=True,
+        output=ModelOutput.from_content(model='m', content=content, stop_reason=stop_reason),
+    )
+
+
+CORRECT = '```python\ndef answer():\n    return 42\n```'
+
+
+@pytest.mark.parametrize('name', ['humaneval', 'live_code_bench'])
+def test_unclosed_reasoning_is_not_graded_as_code(make_adapter: Callable[..., Any], name: str) -> None:
+    """Finding 4: code inside a thought truncated by max_tokens must not be extracted."""
+    adapter = make_adapter(name)
+    assert adapter.filter_prediction(f'<think>\nLet me draft it.\n{CORRECT}\nNow verify', None) == ''
+
+
+def test_truncated_reasoning_scores_zero_and_keeps_raw_response(make_adapter: Callable[..., Any]) -> None:
+    adapter = make_adapter('humaneval')
+    raw = f'<think>\nDraft:\n{CORRECT}\nchecking edge cases'
+    result = adapter.calculate_metrics(_humaneval_state(raw, 'max_tokens')).score
+    assert result.value == {'acc': False}
+    assert result.prediction == raw
+    assert result.metadata['reasoning_boundary'] == 'unclosed'
+    assert result.metadata['final_answer_missing'] is True
+    assert result.metadata['stop_reason'] == 'max_tokens'
+
+
+def test_template_opened_reasoning_is_dropped_before_first_block_extraction(
+    make_adapter: Callable[..., Any],
+) -> None:
+    adapter = make_adapter('humaneval')
+    raw = 'scratch:\n```python\ndef answer():\n    return 0\n```\n</think>\n' + CORRECT
+    result = adapter.calculate_metrics(_humaneval_state(raw, 'stop')).score
+    assert result.value == {'acc': True}
+    assert result.metadata['reasoning_boundary'] == 'closed_without_opening'
+
+
+def test_answers_without_reasoning_tags_are_unchanged(make_adapter: Callable[..., Any]) -> None:
+    result = make_adapter('humaneval').calculate_metrics(_humaneval_state(CORRECT, 'stop')).score
+    assert result.value == {'acc': True}
+    assert 'reasoning_boundary' not in result.metadata
