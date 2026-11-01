@@ -13,7 +13,7 @@ from evalscope.api.messages.perf_metrics import PerformanceMetrics
 from evalscope.api.metric import Score
 from evalscope.api.model import Model, ModelOutput
 from evalscope.api.registry import register_benchmark
-from evalscope.constants import Tags
+from evalscope.constants import ScoreStatus, Tags
 from evalscope.report import Report
 from evalscope.utils.argument_utils import get_secret_value
 from evalscope.utils.function_utils import thread_safe
@@ -32,6 +32,18 @@ from .utils import (
 )
 
 logger = get_logger()
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """Whether ``exc`` means the inference service did not deliver a response."""
+    import httpx
+    import openai
+
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        return True
+    if isinstance(exc, (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)):
+        return True
+    return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
 
 
 def _normalize_openai_base_url(api_url: Optional[str]) -> str:
@@ -234,22 +246,17 @@ class BFCLV4Adapter(AgentAdapter):
             self._attach_perf_metrics(output, agent_messages, metadata)
             return InferenceResult(output=output, messages=agent_messages or None)
         except Exception as e:
-            # This is usually the case when the model getting stuck on one particular test case.
-            # For example, timeout error or FC model returning invalid JSON response.
-            # Since temperature is already set to 0.001, retrying the same test case will not help.
-            # So we continue the generation process and record the error message as the model response
             logger.error(f'Error during inference for sample ID {sample.metadata.get("id")}: {e}')
             logger.error(traceback.format_exc())
-
-            return ModelOutput.from_content(
-                model=model.name,
-                content=json.dumps(
-                    {
-                        'error': str(e),
-                        'error_message': traceback.format_exc(),
-                    }
-                ),
-            )
+            content = json.dumps({'error': str(e), 'error_message': traceback.format_exc()})
+            output = ModelOutput.from_content(model=model.name, content=content)
+            if is_transport_error(e):
+                # The service did not answer: this is not a model response and must stay
+                # identifiable (and retryable) instead of being graded, e.g. as "no tool call".
+                output.error = f'{type(e).__name__}: {e}'
+            # Other failures (for example an FC response that is not valid JSON) are model
+            # behaviour and keep the official BFCL treatment: the message is graded as the answer.
+            return InferenceResult(output=output)
 
     @staticmethod
     def _attach_perf_metrics(output: ModelOutput, agent_messages, metadata) -> None:
@@ -311,6 +318,14 @@ class BFCLV4Adapter(AgentAdapter):
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
+        if task_state.output is not None and task_state.output.error:
+            return Score(
+                extracted_prediction=filtered_prediction,
+                prediction=original_prediction,
+                status=ScoreStatus.TRANSPORT_ERROR,
+                explanation=task_state.output.error,
+                metadata={'transport_error': task_state.output.error},
+            )
         self._init_handler()
 
         score = Score(
