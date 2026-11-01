@@ -115,12 +115,27 @@ class SandboxHandle:
 # ---------------------------------------------------------------------------
 
 
+def _normalize(value: Any) -> Any:
+    """Convert nested models, mappings and sequences to plain JSON-compatible data."""
+    if hasattr(value, 'model_dump'):
+        value = value.model_dump(mode='json')
+    if isinstance(value, dict):
+        return {str(key): _normalize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_normalize(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    return value
+
+
 def _freeze(cfg: Any) -> str:
-    """Produce a stable, hashable representation of a sandbox configuration."""
-    if hasattr(cfg, 'model_dump'):
-        cfg = cfg.model_dump(mode='json')
+    """Produce a stable, hashable representation of a sandbox configuration.
+
+    Nested models are normalized first, so equal configurations always produce equal keys
+    regardless of dict insertion order (``default=str`` would embed an unordered repr).
+    """
     try:
-        return json.dumps(cfg or {}, sort_keys=True, default=str)
+        return json.dumps(_normalize(cfg) or {}, sort_keys=True, default=str)
     except Exception:
         return repr(cfg or {})
 

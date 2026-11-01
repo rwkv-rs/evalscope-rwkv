@@ -695,3 +695,16 @@ class TestTaskConfigSandboxBridge:
             'default_config': {'image': 'my:img'},
         })
         assert cfg.sandbox.default_config == {'image': 'my:img'}
+
+
+def test_pool_key_is_stable_for_equal_nested_pydantic_configs() -> None:
+    """Finding 11: insertion order inside a nested model must not change the pool identity."""
+    from ms_enclave.sandbox.model import DockerSandboxConfig
+
+    from evalscope.api.sandbox.service import _freeze
+
+    first = DockerSandboxConfig(image='python:3.11', env_vars={'A': '1', 'B': '2'})
+    second = DockerSandboxConfig(image='python:3.11', env_vars={'B': '2', 'A': '1'})
+    key = lambda cfg: _freeze({'kind': 'pool', 'manager_config': {}, 'pool_size': 2, 'sandbox_config': cfg})  # noqa: E731
+    assert key(first) == key(second)
+    assert key(first) != key(DockerSandboxConfig(image='python:3.11', env_vars={'A': '1', 'B': '3'}))
