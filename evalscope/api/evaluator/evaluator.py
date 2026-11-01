@@ -21,6 +21,9 @@ class Evaluator(abc.ABC):
         task_config (TaskConfig, optional): The task configuration.
     """
 
+    has_retryable_errors: bool = False
+    """Set when an attempt left failures that ``--eval-retries`` may recover."""
+
     def __init__(
         self,
         benchmark: 'DataAdapter',

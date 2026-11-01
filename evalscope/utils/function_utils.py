@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import wraps
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple, Type, TypeVar
 
@@ -244,7 +244,7 @@ def run_in_threads_with_progress(
                 _try_submit_next()
 
             while pending_futures:
-                completed_futures, _ = wait(pending_futures, timeout=1)
+                completed_futures, _ = wait(pending_futures, timeout=1, return_when=FIRST_COMPLETED)
                 if not completed_futures:
                     pbar.check_log()
                     continue
