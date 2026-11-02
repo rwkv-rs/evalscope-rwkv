@@ -5,10 +5,10 @@ Unifies the two historical code paths:
 * ``CodeExecutionSandboxMixin.EnclaveCodeExecutionBackend`` – one manager per benchmark, pooled.
 * ``EnclaveAgentEnvironment`` – one manager per process, per-sample containers.
 
-Both are now thin wrappers around :class:`SandboxService`.  The service
-caches managers keyed by ``(engine, manager_config)`` so the same
-``base_url`` / Docker daemon is reused across benchmarks and agent
-environments within a process.
+Both are now thin wrappers around :class:`SandboxService`.  Per-sample
+managers are keyed by ``(engine, manager_config)``. Pooled managers also
+include the sandbox configuration and pool size in their identity because
+``ms_enclave`` owns only one initialized pool per manager.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from concurrent.futures import Future
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional, Set, Tuple, TypeVar
+
+from pydantic_core import to_jsonable_python
 
 from evalscope.utils.asyncio_runtime import AsyncioLoopThread
 from evalscope.utils.logger import get_logger
@@ -115,10 +117,14 @@ class SandboxHandle:
 # ---------------------------------------------------------------------------
 
 
-def _freeze(cfg: Optional[Dict[str, Any]]) -> str:
-    """Produce a stable, hashable representation of a manager config dict."""
+def _freeze(cfg: Any) -> str:
+    """Produce a stable, hashable representation of a sandbox configuration.
+
+    Nested pydantic models are converted to plain data, so equal configurations produce equal
+    keys regardless of dict insertion order.
+    """
     try:
-        return json.dumps(cfg or {}, sort_keys=True, default=str)
+        return json.dumps(cfg or {}, sort_keys=True, default=to_jsonable_python)
     except Exception:
         return repr(cfg or {})
 
@@ -200,9 +206,10 @@ class SandboxService:
         self,
         engine: SandboxEngine,
         manager_config: Optional[Dict[str, Any]] = None,
+        cache_key: Optional[Tuple[SandboxEngine, str]] = None,
     ) -> 'SandboxManager':
-        """Return a started manager for ``(engine, manager_config)``."""
-        key = (engine, _freeze(manager_config))
+        """Return a started manager for the explicit or default cache identity."""
+        key = cache_key or (engine, _freeze(manager_config))
         existing = self._managers.get(key)
         if existing is not None:
             return existing
@@ -322,8 +329,18 @@ class SandboxService:
         manager_config: Optional[Dict[str, Any]] = None,
     ) -> PoolHandle:
         """Warm up (if needed) and return a pooled handle for ``engine``."""
-        key = (engine, _freeze(manager_config))
-        manager = await self._get_or_create_manager(engine, manager_config)
+        key = (
+            engine,
+            _freeze(
+                {
+                    'kind': 'pool',
+                    'manager_config': manager_config or {},
+                    'pool_size': pool_size,
+                    'sandbox_config': sandbox_config,
+                }
+            ),
+        )
+        manager = await self._get_or_create_manager(engine, manager_config, cache_key=key)
         if not getattr(manager, '_pool_initialized', False):
             start_task = self._pool_starts.get(key)
             if start_task is None:
