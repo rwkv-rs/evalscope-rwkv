@@ -135,11 +135,6 @@ Resources: [Paper](https://arxiv.org/abs/2511.07685) |
 """
 
 
-def _report_was_truncated(task_state: TaskState) -> bool:
-    """The response stopped at the output limit instead of finishing."""
-    return task_state.output.stop_reason == 'max_tokens'
-
-
 def _is_empty_report(task_state: TaskState) -> bool:
     return not (task_state.output.completion or '').strip()
 
@@ -327,7 +322,7 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
             entries = [{'score': 0.0, **case.metadata} for case in cases]
             # A report cut off by the output limit is incomplete, not an empty answer: it still
             # scores zero (it stays in the denominator) but is labelled distinctly.
-            truncated = _report_was_truncated(context.task_state)
+            truncated = context.task_state.output.stop_reason == 'max_tokens'
             reason = 'truncated_report' if truncated else 'empty_report'
             return JudgeDefinition.skip(
                 Score(
@@ -337,8 +332,9 @@ class ResearchRubricsAdapter(AgentLoopAdapter):
                     main_score_name='compliance_score',
                     explanation=(
                         'Research report was truncated at the output limit before any report text; '
-                        'zero rubric compliance.' if truncated else
-                        'Empty research report receives zero rubric compliance.'
+                        'zero rubric compliance.'
+                        if truncated
+                        else 'Empty research report receives zero rubric compliance.'
                     ),
                     metadata={
                         'source': f'researchrubrics_{reason}',

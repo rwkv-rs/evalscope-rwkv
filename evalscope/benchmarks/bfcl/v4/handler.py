@@ -5,7 +5,7 @@ from bfcl_eval.model_handler.api_inference.openai_completion import OpenAIComple
 from openai.resources.chat.completions import Completions
 
 from evalscope.api.model import GenerateConfig
-from evalscope.models.utils.openai import openai_completion_params
+from evalscope.models.utils.openai import move_unsupported_params_to_extra_body, openai_completion_params
 from evalscope.utils.argument_utils import get_supported_params
 
 # The BFCL handler sets these itself and parses whole (non-streamed) responses.
@@ -40,13 +40,7 @@ class ConfiguredOpenAICompletionsHandler(OpenAICompletionsHandler):
         }
         # Same rule as the generic OpenAI path: non-standard fields such as top_k or
         # chat_template_kwargs travel in extra_body instead of being rejected by the SDK.
-        supported = get_supported_params(Completions.create)
-        extra_body = dict(params.pop('extra_body', None) or {})
-        for key in list(params):
-            if key not in supported:
-                extra_body[key] = params.pop(key)
-        if extra_body:
-            params['extra_body'] = extra_body
+        move_unsupported_params_to_extra_body(params, get_supported_params(Completions.create))
         return params
 
     @staticmethod

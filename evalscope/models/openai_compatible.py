@@ -32,6 +32,7 @@ from .utils.openai import (
     chat_choices_from_openai,
     collect_stream_response,
     model_output_from_openai,
+    move_unsupported_params_to_extra_body,
     openai_chat_messages,
     openai_chat_tool_choice,
     openai_chat_tools,
@@ -295,14 +296,7 @@ class OpenAICompatibleAPI(ModelAPI):
         if not hasattr(self, '_valid_params'):
             self._valid_params = get_supported_params(self.client.chat.completions.create)
 
-        # Move unsupported parameters to extra_body.
-        extra_body = params.get('extra_body', {})
-        for key in list(params.keys()):
-            if key not in self._valid_params:
-                extra_body[key] = params.pop(key)
-
-        if extra_body:
-            params['extra_body'] = extra_body
+        move_unsupported_params_to_extra_body(params, self._valid_params)
 
     def on_response(self, response: Dict[str, Any]) -> None:
         """Hook for subclasses to do custom response handling."""

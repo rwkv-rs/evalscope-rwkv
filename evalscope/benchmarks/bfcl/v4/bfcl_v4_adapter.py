@@ -15,6 +15,7 @@ from evalscope.api.metric import Score
 from evalscope.api.model import Model, ModelOutput
 from evalscope.api.registry import register_benchmark
 from evalscope.constants import ScoreStatus, Tags
+from evalscope.models.utils.openai import is_transport_error
 from evalscope.report import Report
 from evalscope.utils.argument_utils import get_secret_value
 from evalscope.utils.function_utils import thread_safe
@@ -34,18 +35,6 @@ from .utils import (
 )
 
 logger = get_logger()
-
-
-def is_transport_error(exc: BaseException) -> bool:
-    """Whether ``exc`` means the inference service did not deliver a response."""
-    import httpx
-    import openai
-
-    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
-        return True
-    if isinstance(exc, (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)):
-        return True
-    return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
 
 
 def _normalize_openai_base_url(api_url: Optional[str]) -> str:

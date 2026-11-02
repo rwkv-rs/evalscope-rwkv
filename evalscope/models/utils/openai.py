@@ -7,7 +7,14 @@ from collections.abc import AsyncIterable, Iterable
 from copy import copy
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
-from openai import APIStatusError, OpenAIError
+import httpx
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    InternalServerError,
+    OpenAIError,
+    RateLimitError,
+)
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
@@ -1150,3 +1157,25 @@ async def async_collect_stream_response(
         object='chat.completion',
         usage=usage if usage is not None else getattr(collected_chunks[-1], 'usage', None),
     ), ttft
+
+
+def move_unsupported_params_to_extra_body(params: Dict[str, Any], supported: Any) -> None:
+    """Move request parameters the SDK method does not accept into ``extra_body`` (in place).
+
+    ``extra_body`` is copied first: it may be the caller's ``GenerateConfig.extra_body``.
+    """
+    extra_body = dict(params.get('extra_body') or {})
+    for key in list(params.keys()):
+        if key not in supported:
+            extra_body[key] = params.pop(key)
+    if extra_body:
+        params['extra_body'] = extra_body
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """Whether ``exc`` means the inference service did not deliver a response."""
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        return True
+    if isinstance(exc, (APIConnectionError, RateLimitError, InternalServerError)):
+        return True
+    return isinstance(exc, APIStatusError) and exc.status_code >= 500

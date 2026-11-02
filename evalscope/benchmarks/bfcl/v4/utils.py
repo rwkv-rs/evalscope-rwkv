@@ -17,6 +17,7 @@ from evalscope.api.messages.chat_message import (
     ChatMessageTool,
     ChatMessageUser,
 )
+from evalscope.api.messages.content import ContentReasoning, ContentText
 from evalscope.api.tool import ToolCall, ToolFunction
 from evalscope.report import (
     Category,
@@ -428,7 +429,7 @@ def _native_json_schema(schema: Dict[str, Any], type_mapping: Dict[str, type]) -
     labels = {str: 'string', int: 'integer', float: 'float', bool: 'boolean', list: 'array', dict: 'dict'}
     value_type = type_mapping[schema['type']]
     if value_type not in labels:
-        raise ValueError(f"Unsupported BFCL native-FC type: {schema['type']}")
+        raise ValueError(f'Unsupported BFCL native-FC type: {schema["type"]}')
     adapted = deepcopy(schema)
     adapted['type'] = labels[value_type]
     if value_type is list and 'items' in adapted:
@@ -516,8 +517,7 @@ def compute_entry_result(
             for function in grading_entry['function']:
                 parameters = function['parameters']
                 parameters['properties'] = {
-                    name: _native_json_schema(schema, mapping)
-                    for name, schema in parameters['properties'].items()
+                    name: _native_json_schema(schema, mapping) for name, schema in parameters['properties'].items()
                 }
             language = Language.PYTHON
 
@@ -626,8 +626,6 @@ def apply_api_trace(messages: Optional[List[ChatMessage]], trace: List[Dict[str,
     synthesized messages are left unchanged and ``False`` is returned; the raw trace is still
     stored with the prediction.
     """
-    from evalscope.api.messages import ChatMessageAssistant, ContentReasoning, ContentText
-
     responses = [record.get('response') for record in trace if 'response' in record]
     assistants = [message for message in messages or [] if isinstance(message, ChatMessageAssistant)]
     if not assistants or len(assistants) != len(responses):
