@@ -4,8 +4,9 @@ Run evaluation for LLMs.
 """
 
 import os
+import time
 from argparse import Namespace
-from typing import Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Union
 
 from evalscope.config import TaskConfig, load_task_config_snapshot, parse_task_config
 from evalscope.constants import DEFAULT_WORK_DIR, EvalBackend
@@ -21,6 +22,10 @@ from evalscope.utils.model_utils import seed_everything
 from evalscope.utils.resource_utils import compute_eval_total_count
 
 logger = get_logger()
+
+if TYPE_CHECKING:
+    from evalscope.api.evaluator import Evaluator
+    from evalscope.report import Report
 
 
 def run_task(task_cfg: Union[str, dict, TaskConfig, List[TaskConfig], Namespace]) -> Union[dict, List[dict]]:
@@ -142,6 +147,61 @@ def get_backend_manager_class(eval_backend: EvalBackend):
         raise NotImplementedError(f'Not implemented for evaluation backend {eval_backend}')
 
 
+def _evaluate_with_retries(
+    evaluator: 'Evaluator',
+    task_config: TaskConfig,
+    outputs: OutputsStructure,
+) -> Union[dict, 'Report']:
+    """Retry only this benchmark, with fresh runtime state and durable sample caches."""
+    from evalscope.api.evaluator import CacheManager
+    from evalscope.api.registry import create_evaluator, get_benchmark
+
+    retries = task_config.eval_retries
+    # A rerun committed by a finished attempt is not repeated; one staged by a failed attempt is resumed.
+    rerun_review = task_config.rerun_review
+    staged_reviews: Dict[str, str] = {}
+    try:
+        for attempt in range(retries + 1):
+            if attempt:
+                delay = min(60, 5 * 2 ** (attempt - 1))
+                logger.warning(
+                    f'{evaluator.benchmark_name}: retry {attempt}/{retries} in {delay}s, '
+                    f'resuming from {outputs.outputs_dir}'
+                )
+                time.sleep(delay)
+                retry_config = task_config.model_copy(
+                    update={'use_cache': outputs.outputs_dir, 'rerun_review': rerun_review}
+                )
+                if retry_config.seed is not None:
+                    seed_everything(retry_config.seed)
+                benchmark = get_benchmark(evaluator.benchmark_name, retry_config)
+                benchmark.validate_judge_strategy()
+                evaluator = create_evaluator(
+                    benchmark=benchmark, model=evaluator.model, outputs=outputs, task_config=retry_config
+                )
+            evaluator.resume_review_reruns, staged_reviews = staged_reviews, {}
+            evaluator.keep_review_reruns_on_failure = attempt < retries
+            try:
+                report = evaluator.eval()
+            except Exception:
+                staged_reviews = getattr(evaluator, 'suspended_review_reruns', {})
+                if attempt == retries:
+                    raise
+                logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} failed', exc_info=True)
+                continue
+            rerun_review = False
+            summary = getattr(report, 'execution_summary', None)
+            failed = evaluator.has_retryable_errors or (summary is not None and summary.errored > 0)
+            if not retries or not failed:
+                return report
+            logger.warning(f'{evaluator.benchmark_name}: attempt {attempt + 1} finished with execution failures')
+    finally:
+        # Staged reruns not handed to a later attempt are abandoned; the original reviews stay intact.
+        CacheManager.remove_staged_reviews(staged_reviews)
+    # An exhausted partial attempt must not be published as a completed benchmark.
+    raise RuntimeError(f'{evaluator.benchmark_name}: execution failures remain; cache: {outputs.outputs_dir}')
+
+
 def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
     """Evaluate the model based on the provided task configuration."""
     from evalscope.api.evaluator import Evaluator
@@ -162,6 +222,12 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
     for dataset_name in task_config.datasets:
         # Create evaluator for each dataset
         benchmark = get_benchmark(dataset_name, task_config)
+        if (
+            task_config.eval_retries
+            and task_config.seed is None
+            and (benchmark.shuffle or benchmark.shuffle_choices or benchmark.few_shot_random)
+        ):
+            raise ValueError(f'{dataset_name}: --eval-retries requires --seed for randomized datasets')
         # Validate only on the execution path. ``get_benchmark`` is also a metadata helper and
         # must not reject a configuration before an evaluation has been requested.
         benchmark.validate_judge_strategy()
@@ -224,7 +290,7 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
             logger=logger,
         ) as pbar:
             for i, evaluator in enumerate(pbar):
-                res_dict = evaluator.eval()
+                res_dict = _evaluate_with_retries(evaluator, task_config, outputs)
                 identity = evaluation_identity.benchmarks[evaluator.benchmark_name]
                 if identity.review_pending and isinstance(res_dict, Report):
                     identity.review_pending = False

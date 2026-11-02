@@ -166,6 +166,13 @@ class TaskState:
         self._output = output if output else ModelOutput(model=str(model))
         self._completed = completed
         self._agent_trace: Optional[AgentTrace] = None
+        self.sample_fingerprint: Optional[str] = None
+        """Content hash of the sample as loaded, recorded before inference for cache identity."""
+        self.prediction_id: Optional[str] = None
+        """Identity of the persisted prediction; reviews are linked to it."""
+        self.legacy_unique_prediction: Optional[bool] = None
+        """For a restored legacy prediction (no id): whether it is the only row for its index.
+        ``None`` when the state was not restored from a prediction cache."""
         if sample.choices:
             self._choices = Choices(sample.choices)
         else:
