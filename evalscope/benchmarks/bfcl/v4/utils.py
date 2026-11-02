@@ -6,7 +6,7 @@ import uuid
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
@@ -17,6 +17,7 @@ from evalscope.api.messages.chat_message import (
     ChatMessageTool,
     ChatMessageUser,
 )
+from evalscope.api.messages.content import ContentReasoning, ContentText
 from evalscope.api.tool import ToolCall, ToolFunction
 from evalscope.report import (
     Category,
@@ -375,7 +376,13 @@ def synthesize_agent_messages(
 
     messages: List[ChatMessage] = []
     questions: List[List[Dict[str, Any]]] = prompt_entry.get('question', []) or []
-    turns: List[Any] = model_result if isinstance(model_result, list) else []
+    if isinstance(model_result, str) or (
+        isinstance(model_result, list) and model_result and all(isinstance(call, dict) for call in model_result)
+    ):
+        # Single-turn results are one step: a list of {name: args} calls, or text when prompting.
+        turns: List[Any] = [[model_result]]
+    else:
+        turns = model_result if isinstance(model_result, list) else []
     # Inference_log mixes per-turn dicts and bare state-log lists; keep only
     # the per-turn dicts so they align positionally with ``turns``.
     turn_logs: List[Dict[str, Any]] = (
@@ -415,6 +422,19 @@ def synthesize_agent_messages(
 # ----------------------------
 # Scoring helpers
 # ----------------------------
+
+
+def _native_json_schema(schema: Dict[str, Any], type_mapping: Dict[str, type]) -> Dict[str, Any]:
+    """Map BFCL source-language types to its checker types for decoded JSON values."""
+    labels = {str: 'string', int: 'integer', float: 'float', bool: 'boolean', list: 'array', dict: 'dict'}
+    value_type = type_mapping[schema['type']]
+    if value_type not in labels:
+        raise ValueError(f'Unsupported BFCL native-FC type: {schema["type"]}')
+    adapted = deepcopy(schema)
+    adapted['type'] = labels[value_type]
+    if value_type is list and 'items' in adapted:
+        adapted['items'] = _native_json_schema(adapted['items'], type_mapping)
+    return adapted
 
 
 def compute_entry_result(
@@ -484,17 +504,37 @@ def compute_entry_result(
             language = Language.PYTHON
             return_format = ReturnFormat.PYTHON
 
-        return _evaluate_single_ast_entry(
+        grading_entry = prompt_entry
+        if handler.is_fc_model and language in (Language.JAVA, Language.JAVASCRIPT):
+            from bfcl_eval.constants.type_mappings import JAVA_TYPE_CONVERSION, JS_TYPE_CONVERSION
+
+            # Native FC arguments are already decoded JSON, but the Java/JS checkers expect
+            # source strings. Grade them with the Python (decoded-value) checker instead,
+            # after mapping the declared Java/JS type names to its labels. The official
+            # checker only inspects the top-level type and one level of ``items``.
+            mapping = JAVA_TYPE_CONVERSION if language == Language.JAVA else JS_TYPE_CONVERSION
+            grading_entry = deepcopy(prompt_entry)
+            for function in grading_entry['function']:
+                parameters = function['parameters']
+                parameters['properties'] = {
+                    name: _native_json_schema(schema, mapping) for name, schema in parameters['properties'].items()
+                }
+            language = Language.PYTHON
+
+        result = _evaluate_single_ast_entry(
             handler=handler,
             index=index,
             model_result_item=model_result,
             possible_answer_item=ground_truth,
-            prompt_entry=prompt_entry,
+            prompt_entry=grading_entry,
             model_name=model_name,
             test_category=test_category,
             language=language,
             return_format=return_format,
         )
+        if 'prompt' in result:
+            result['prompt'] = prompt_entry
+        return result
 
 
 # ----------------------------
@@ -577,3 +617,31 @@ def compute_aggregate_subsets(report: Report) -> None:
                 dummy_subsets.append(subset)
         dummy_category = Category(name='-', subsets=dummy_subsets)
         metric.categories.append(dummy_category)
+
+
+def apply_api_trace(messages: Optional[List[ChatMessage]], trace: List[Dict[str, Any]]) -> bool:
+    """Restore server tool-call ids and reasoning onto synthesized assistant messages.
+
+    Assistant messages correspond positionally to model API calls. When the counts differ the
+    synthesized messages are left unchanged and ``False`` is returned; the raw trace is still
+    stored with the prediction.
+    """
+    responses = [record.get('response') for record in trace if 'response' in record]
+    assistants = [message for message in messages or [] if isinstance(message, ChatMessageAssistant)]
+    if not assistants or len(assistants) != len(responses):
+        return False
+    for message, response in zip(assistants, responses):
+        choices = (response or {}).get('choices') or []
+        if not choices:
+            continue
+        server_message = choices[0].get('message') or {}
+        server_calls = server_message.get('tool_calls') or []
+        if message.tool_calls and len(server_calls) == len(message.tool_calls):
+            for call, server_call in zip(message.tool_calls, server_calls):
+                if server_call.get('id'):
+                    call.id = server_call['id']
+        reasoning = server_message.get('reasoning_content') or server_message.get('reasoning')
+        if reasoning:
+            text = message.text
+            message.content = [ContentReasoning(reasoning=str(reasoning)), ContentText(text=text)]
+    return True

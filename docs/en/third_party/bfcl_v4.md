@@ -121,13 +121,19 @@ task_cfg = TaskConfig(
         }
     },
     generation_config={
-        'temperature': 0, # Only temperature parameter is supported, other parameters will be ignored
+        'temperature': 0,
+        'max_tokens': 2048, # Optional per-response output limit, including memory prerequisites and all turns
     },
     use_cache='outputs/bfcl_v4', # Setting a cache directory is recommended to speed up re-runs in case of errors
     limit=10,  # Limit the evaluation count for quick testing; remove this for formal evaluation
 )
 run_task(task_cfg=task_cfg)
 ```
+
+Only `temperature` and `max_tokens` are forwarded from `generation_config`.
+
+Since evaluation version `v1.1`, native function-calling Java/JavaScript arguments are
+checked as decoded JSON values (e.g. `true` is a boolean, `"true"` is not).
 
 Output example:
 

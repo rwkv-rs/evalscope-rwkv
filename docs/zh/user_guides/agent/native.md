@@ -221,6 +221,11 @@ run_task(task_config)
 前置依赖：`pip install evalscope[swe_bench]`，本机已装好 Docker。
 ```
 
+## ResearchRubrics 空报告
+
+自评测版本 `v1.1` 起，正常生成的空报告直接计为零分，不调用 judge
+（`judge_skip_reason=empty_report`）。因模型错误导致的空输出仍按失败处理。
+
 ## 常见问题
 
 **模型完全没有调用工具**

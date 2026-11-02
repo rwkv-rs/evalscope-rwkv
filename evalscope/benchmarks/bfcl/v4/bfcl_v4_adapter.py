@@ -1,6 +1,7 @@
 import json
 import os
 import traceback
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,7 +14,8 @@ from evalscope.api.messages.perf_metrics import PerformanceMetrics
 from evalscope.api.metric import Score
 from evalscope.api.model import Model, ModelOutput
 from evalscope.api.registry import register_benchmark
-from evalscope.constants import Tags
+from evalscope.constants import ScoreStatus, Tags
+from evalscope.models.utils.openai import is_transport_error
 from evalscope.report import Report
 from evalscope.utils.argument_utils import get_secret_value
 from evalscope.utils.function_utils import thread_safe
@@ -22,6 +24,7 @@ from evalscope.utils.logger import get_logger
 
 from .utils import (
     ALL_SCORING_CATEGORIES,
+    apply_api_trace,
     compute_aggregate_subsets,
     compute_entry_result,
     load_bfcl_data,
@@ -44,6 +47,7 @@ def _normalize_openai_base_url(api_url: Optional[str]) -> str:
 @register_benchmark(
     BenchmarkMeta(
         name='bfcl_v4',
+        evaluation_version='v1.1',
         pretty_name='BFCL-v4',
         tags=[Tags.FUNCTION_CALLING, Tags.AGENT],
         description="""
@@ -162,7 +166,8 @@ class BFCLV4Adapter(AgentAdapter):
             limit=self.limit,
             repeats=self.repeats,
             shuffle=self.shuffle,
-            seed=None,
+            # Never depend on global random state: a resumed or retried run must see the same order.
+            seed=self.seed if self.seed is not None else zlib.crc32(category.encode('utf-8')),
         )
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
@@ -178,7 +183,7 @@ class BFCLV4Adapter(AgentAdapter):
         if self.handler is not None:
             return  # Handler already initialized
 
-        from bfcl_eval.model_handler.api_inference.openai_completion import OpenAICompletionsHandler
+        from .handler import ConfiguredOpenAICompletionsHandler
 
         # Set env variables for OpenAI API
         base_url = _normalize_openai_base_url(self._task_config.api_url)
@@ -188,13 +193,14 @@ class BFCLV4Adapter(AgentAdapter):
         else:
             os.environ.pop('OPENAI_BASE_URL', None)
 
-        patch_openai_completions_handler_empty_tool_calls(OpenAICompletionsHandler)
+        patch_openai_completions_handler_empty_tool_calls(ConfiguredOpenAICompletionsHandler)
 
-        self.handler = OpenAICompletionsHandler(
+        self.handler = ConfiguredOpenAICompletionsHandler(
             model_name=self._task_config.model,
             temperature=self._task_config.generation_config.temperature,
             registry_name=self._task_config.model_id,
             is_fc_model=self.is_fc_model,
+            generation_config=self._task_config.generation_config,
         )
 
         self._prereq_inference()
@@ -212,12 +218,17 @@ class BFCLV4Adapter(AgentAdapter):
         self.prereq_finished = True
 
     def _on_inference(self, model: Model, sample: Sample) -> InferenceResult:
+        trace: List[Dict[str, Any]] = []
         try:
             self._init_handler()
 
-            result, metadata = self.handler.inference(
-                deepcopy(sample.metadata), include_input_log=False, exclude_state_log=True
-            )
+            self.handler.start_trace()
+            try:
+                result, metadata = self.handler.inference(
+                    deepcopy(sample.metadata), include_input_log=False, exclude_state_log=True
+                )
+            finally:
+                trace = self.handler.collect_trace()
 
             output = ModelOutput.from_content(
                 model=model.name,
@@ -229,25 +240,23 @@ class BFCLV4Adapter(AgentAdapter):
                 is_fc_model=self.is_fc_model,
                 inference_log=metadata.get('inference_log') if isinstance(metadata, dict) else None,
             )
+            aligned = apply_api_trace(agent_messages, trace)
+            output.metadata = {**(output.metadata or {}), 'bfcl_api_trace': trace, 'bfcl_trace_aligned': aligned}
             self._attach_perf_metrics(output, agent_messages, metadata)
             return InferenceResult(output=output, messages=agent_messages or None)
         except Exception as e:
-            # This is usually the case when the model getting stuck on one particular test case.
-            # For example, timeout error or FC model returning invalid JSON response.
-            # Since temperature is already set to 0.001, retrying the same test case will not help.
-            # So we continue the generation process and record the error message as the model response
             logger.error(f'Error during inference for sample ID {sample.metadata.get("id")}: {e}')
             logger.error(traceback.format_exc())
-
-            return ModelOutput.from_content(
-                model=model.name,
-                content=json.dumps(
-                    {
-                        'error': str(e),
-                        'error_message': traceback.format_exc(),
-                    }
-                ),
-            )
+            content = json.dumps({'error': str(e), 'error_message': traceback.format_exc()})
+            output = ModelOutput.from_content(model=model.name, content=content)
+            output.metadata = {'bfcl_api_trace': trace}
+            if is_transport_error(e):
+                # The service did not answer: this is not a model response and must stay
+                # identifiable (and retryable) instead of being graded, e.g. as "no tool call".
+                output.error = f'{type(e).__name__}: {e}'
+            # Other failures (for example an FC response that is not valid JSON) are model
+            # behaviour and keep the official BFCL treatment: the message is graded as the answer.
+            return InferenceResult(output=output)
 
     @staticmethod
     def _attach_perf_metrics(output: ModelOutput, agent_messages, metadata) -> None:
@@ -309,6 +318,14 @@ class BFCLV4Adapter(AgentAdapter):
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
+        if task_state.output is not None and task_state.output.error:
+            return Score(
+                extracted_prediction=filtered_prediction,
+                prediction=original_prediction,
+                status=ScoreStatus.TRANSPORT_ERROR,
+                explanation=task_state.output.error,
+                metadata={'transport_error': task_state.output.error},
+            )
         self._init_handler()
 
         score = Score(

@@ -268,6 +268,73 @@ def test_parse_error_is_not_retried() -> None:
     assert len(judge.calls) == 1
 
 
+@pytest.mark.parametrize('report', ['', ' \n\t'])
+def test_empty_report_scores_zero_with_axis_metrics_and_no_judge(report: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = make_adapter()
+    initialize = MagicMock(side_effect=AssertionError('Empty reports must not initialize a judge'))
+    monkeypatch.setattr(adapter, 'init_llm_judges', initialize)
+    state = make_state(adapter, [
+        {'criterion': 'Answer', 'weight': 5.0, 'axis': 'Content'},
+        {'criterion': 'References', 'weight': 2.0, 'axis': 'Sources'},
+        {'criterion': 'Error', 'weight': -1.0, 'axis': 'Content'},
+        {'criterion': 'Penalty only', 'weight': -1.0, 'axis': 'Penalty'},
+    ], report=report)
+    scores = adapter.batch_calculate_metrics([state], [adapter.calculate_metrics(state)])
+    score = scores[0].score
+    assert score.value == {'compliance_score': 0.0, 'axis/Content': 0.0, 'axis/Sources': 0.0}
+    assert score.status is ScoreStatus.SUCCESS
+    assert score.prediction == report
+    assert score.main_score_name == 'compliance_score'
+    assert score.metadata['judge_skipped'] is True
+    assert score.metadata['judge_skip_reason'] == 'empty_report'
+    assert score.metadata['agent']['strategy'] == 'function_calling'
+    assert score.judge_summary is None
+    initialize.assert_not_called()
+
+
+@pytest.mark.parametrize('target,message', [
+    ('not json', 'JSON-encoded'),
+    ('{}', 'at least one rubric'),
+    ('[]', 'at least one rubric'),
+    ('[{"criterion":"Penalty","weight":-1,"axis":"Content"}]', 'positive-weight'),
+    ('[{"criterion":"Bad weight","weight":"invalid","axis":"Content"}]', 'could not convert'),
+])
+def test_empty_report_still_validates_rubrics(target: str, message: str) -> None:
+    adapter = make_adapter()
+    state = make_state(adapter, [], report='')
+    state.target = target
+    with pytest.raises(ValueError, match=message):
+        adapter._score_task_state(state)
+
+
+@pytest.mark.parametrize('missing_choices', [False, True])
+def test_failed_or_missing_output_is_not_scored_as_empty_report(missing_choices: bool) -> None:
+    adapter = make_adapter()
+    state = make_state(adapter, [{'criterion': 'Answer', 'weight': 1, 'axis': 'Content'}], report='')
+    if missing_choices:
+        state.output.choices = []
+    else:
+        state.output.error = 'model request failed'
+    with pytest.raises(ValueError, match='model output'):
+        adapter._score_task_state(state)
+
+
+def test_mixed_batch_counts_empty_report_and_preserves_nonempty_judge_score() -> None:
+    adapter = make_adapter()
+    judge = FakeJudge([binary_response('Satisfied', 1.0)])
+    adapter.llm_judge = judge
+    rubrics = [{'criterion': 'Answer', 'weight': 1, 'axis': 'Content'}]
+    states = [make_state(adapter, rubrics, report=''), make_state(adapter, rubrics, report='Report')]
+    scores = adapter.batch_calculate_metrics(states, [adapter.calculate_metrics(state) for state in states])
+    assert [s.score.value['compliance_score'] for s in scores] == [0.0, 1.0]
+    assert len(judge.calls) == 1
+    aggregates = {score.metric_name: score for score in adapter.aggregate_scores(scores)}
+    assert aggregates['compliance_score'].score == 0.5
+    assert aggregates['compliance_score'].num == 2
+    assert aggregates['axis_content'].score == 0.5
+    assert aggregates['axis_content'].num == 2
+
+
 def test_long_report_uses_chunk_and_synthesis() -> None:
     adapter = make_adapter(judge_context_limit=1, judge_chunk_size=1)
     judge = ChunkAwareJudge()
@@ -341,3 +408,18 @@ def test_aggregate_scores_outputs_diagnostic_dimensions() -> None:
     assert axis_score.num == 1
     domain_scores = [s for s in scores if 'domain' in s.metric_name or 'ai' in s.metric_name or 'other' in s.metric_name]
     assert len(domain_scores) >= 2
+
+
+def test_truncated_report_is_labelled_distinctly_from_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 9: a report cut off by max_tokens is not a normally completed empty report."""
+    adapter = make_adapter()
+    monkeypatch.setattr(adapter, 'init_llm_judges', MagicMock(side_effect=AssertionError('no judge for no report')))
+    state = make_state(adapter, [{'criterion': 'Answer', 'weight': 5.0, 'axis': 'Content'}], report='')
+    state.output.choices[0].stop_reason = 'max_tokens'
+    scores = adapter.batch_calculate_metrics([state], [adapter.calculate_metrics(state)])
+    score = scores[0].score
+    assert score.value == {'compliance_score': 0.0, 'axis/Content': 0.0}
+    assert score.status is ScoreStatus.SUCCESS
+    assert score.metadata['judge_skip_reason'] == 'truncated_report'
+    assert score.metadata['final_answer_missing'] is True
+    assert score.metadata['stop_reason'] == 'max_tokens'

@@ -43,6 +43,34 @@ class TransportFailingJudge(ScriptedJudge):
         raise RuntimeError('judge transport unavailable')
 
 
+@pytest.mark.parametrize('reply,expected', [
+    ('{"verdict":"Satisfied","score":1,"confidence":1,"reasoning":"ok",'
+     '"evidence_quotes":["Report"],"missing_elements":[]}', {'compliance_score': 1.0, 'axis/Content': 1.0}),
+    ('not JSON', {}),
+    ('[ERROR] judge unavailable', {}),
+])
+def test_researchrubrics_nonempty_reports_keep_judge_contract(reply: str, expected: dict) -> None:
+    config = TaskConfig(model='m', datasets=['researchrubrics'], judge={'strategy': 'llm', 'models': [{'model_id': 'j'}]})
+    adapter = get_benchmark('researchrubrics', config)
+    judge = ScriptedJudge([reply])
+    adapter.llm_judge = judge
+    state = make_state('Report', '[{"criterion":"Answer","weight":1,"axis":"Content"}]')
+    score = adapter._score_task_state(state)
+    assert score.value == expected
+    assert score.status is (ScoreStatus.SUCCESS if expected else ScoreStatus.EXCLUDED)
+    assert len(judge.calls) == 1
+
+
+def test_researchrubrics_judge_transport_failure_remains_excluded() -> None:
+    config = TaskConfig(model='m', datasets=['researchrubrics'], judge={'strategy': 'llm', 'models': [{'model_id': 'j'}]})
+    adapter = get_benchmark('researchrubrics', config)
+    adapter.llm_judge = TransportFailingJudge()
+    score = adapter._score_task_state(make_state('Report', '[{"criterion":"Answer","weight":1,"axis":"Content"}]'))
+    assert score.value == {}
+    assert score.status is ScoreStatus.EXCLUDED
+    assert score.metadata['judge_attempts'][0]['status'] == 'transport_error'
+
+
 def make_state(prediction: str, target: str) -> TaskState:
     sample = Sample(id=0, input='Who wrote Hamlet?', target=target, metadata={})
     return TaskState(model='m', sample=sample, output=ModelOutput.from_content('m', prediction), completed=True)
