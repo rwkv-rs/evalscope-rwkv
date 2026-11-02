@@ -7,6 +7,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic_core import to_jsonable_python
 
 from evalscope.api.agent import AgentTrace
 from evalscope.api.dataset import Dataset
@@ -45,7 +46,7 @@ def sample_fingerprint(sample: Any) -> str:
         'choices': sample.choices,
         'tools': [tool.model_dump(mode='json') for tool in sample.tools] if sample.tools else None,
     }
-    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode('utf-8')
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=to_jsonable_python).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
 

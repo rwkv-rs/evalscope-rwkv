@@ -163,7 +163,7 @@ def _evaluate_with_retries(
     try:
         for attempt in range(retries + 1):
             if attempt:
-                delay = min(60, 5 * 2**(attempt - 1))
+                delay = min(60, 5 * 2 ** (attempt - 1))
                 logger.warning(
                     f'{evaluator.benchmark_name}: retry {attempt}/{retries} in {delay}s, '
                     f'resuming from {outputs.outputs_dir}'
@@ -222,8 +222,10 @@ def evaluate_model(task_config: TaskConfig, outputs: OutputsStructure) -> dict:
     for dataset_name in task_config.datasets:
         # Create evaluator for each dataset
         benchmark = get_benchmark(dataset_name, task_config)
-        if task_config.eval_retries and task_config.seed is None and (
-            benchmark.shuffle or benchmark.shuffle_choices or benchmark.few_shot_random
+        if (
+            task_config.eval_retries
+            and task_config.seed is None
+            and (benchmark.shuffle or benchmark.shuffle_choices or benchmark.few_shot_random)
         ):
             raise ValueError(f'{dataset_name}: --eval-retries requires --seed for randomized datasets')
         # Validate only on the execution path. ``get_benchmark`` is also a metadata helper and

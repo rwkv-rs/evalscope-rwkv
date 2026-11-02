@@ -121,11 +121,7 @@ class DefaultEvaluator(Evaluator):
         outputs: 'OutputsStructure',
         task_config: 'TaskConfig',
     ):
-        # Store core components needed for evaluation
-        self.benchmark = benchmark
-        self.model = model
-        self.outputs = outputs
-        self.task_config = task_config
+        super().__init__(benchmark=benchmark, model=model, outputs=outputs, task_config=task_config)
 
         # Extract frequently used identifiers
         self.benchmark_name = benchmark.name
@@ -153,7 +149,6 @@ class DefaultEvaluator(Evaluator):
 
         # Initialize PerfCollector for collecting per-request performance metrics
         self.perf_collector = PerfCollector()
-        self.has_retryable_errors = False
         self._sample_scores_by_subset: Dict[str, List[SampleScore]] = {}
         self._execution_tracker = ExecutionTracker()
         self._perf_request_count = 0
@@ -242,11 +237,14 @@ class DefaultEvaluator(Evaluator):
 
             logger.info(f'Benchmark {self.benchmark_name} evaluation finished.')
             return report
-        except BaseException as exc:
-            if self.keep_review_reruns_on_failure and isinstance(exc, Exception):
+        except Exception:
+            if self.keep_review_reruns_on_failure:
                 self.suspended_review_reruns = self.cache_manager.suspend_review_reruns()
             else:
                 self.cache_manager.discard_review_reruns()
+            raise
+        except BaseException:
+            self.cache_manager.discard_review_reruns()
             raise
         finally:
             self.finalize()
