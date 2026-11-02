@@ -45,7 +45,7 @@ def _send(
         if len(body) > MAX_UNCOMPRESSED_BYTES or len(compressed) > MAX_COMPRESSED_BYTES:
             raise ValueError('Scoreboard publication exceeds the 64 MiB compressed or 256 MiB raw limit')
         headers.update({'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
-    request = Request(f"{base_url.rstrip('/')}{path}", data=compressed, method=method, headers=headers)
+    request = Request(f'{base_url.rstrip("/")}{path}', data=compressed, method=method, headers=headers)
     with urlopen(request, timeout=60) as response:
         return response.status, json.loads(response.read().decode('utf-8'))
 
@@ -96,10 +96,9 @@ def _sample(
     raw_completion = _text(score.get('prediction') if raw_value is None else raw_value)
     score_name = score.get('main_score_name') or metric_name
     score_value = (score.get('value') or {}).get(score_name) if score.get('status') == 'success' else None
-    outcome = 'unanswered' if not raw_completion.strip() else {
-        1: 'correct',
-        0: 'incorrect'
-    }.get(score_value, 'undetermined')
+    outcome = (
+        'unanswered' if not raw_completion.strip() else {1: 'correct', 0: 'incorrect'}.get(score_value, 'undetermined')
+    )
     messages = list(review.get('messages') or prediction.get('messages') or [])
     if messages and messages[-1].get('role') == 'assistant':
         messages = messages[:-1]
@@ -111,10 +110,7 @@ def _sample(
     return {
         'sample_index': sample_index,
         'document_index': int(review['index']),
-        'document': {
-            'subset': subset,
-            'metadata': sample_score.get('sample_metadata')
-        },
+        'document': {'subset': subset, 'metadata': sample_score.get('sample_metadata')},
         'metrics': score.get('value') or {},
         'model_response': {
             'text': raw_completion,
@@ -153,7 +149,7 @@ def _samples(
         # Concurrent writers may persist predictions and reviews in different orders.
         prediction_rows = prediction_path.read_text(encoding='utf-8').splitlines()
         predictions = {int(row['index']): row for row in map(json.loads, filter(str.strip, prediction_rows))}
-        subset = review_path.stem[len(prefix):]
+        subset = review_path.stem[len(prefix) :]
         review_rows = review_path.read_text(encoding='utf-8').splitlines()
         for review in map(json.loads, filter(str.strip, review_rows)):
             sample, is_truncated = _sample(len(samples), subset, review, predictions[int(review['index'])], metric_name)
@@ -208,17 +204,14 @@ def publish_benchmark_callback(
         'benchmark': spec,
         'limit': config.get('limit'),
         'repeats': config.get('repeats'),
-        'seed': config.get('seed')
+        'seed': config.get('seed'),
     }
-    category_id = f"benchmark_{re.sub(r'[^a-z0-9_]+', '_', benchmark.lower()).strip('_')}"
+    category_id = f'benchmark_{re.sub(r"[^a-z0-9_]+", "_", benchmark.lower()).strip("_")}'
     comparison = {
         'model': metadata['comparison']['model'],
         'benchmark': {
             'label': str(report.get('dataset_pretty_name') or benchmark),
-            'categories': [{
-                'id': category_id,
-                'label': str(report.get('dataset_pretty_name') or benchmark)
-            }],
+            'categories': [{'id': category_id, 'label': str(report.get('dataset_pretty_name') or benchmark)}],
             'evaluation_method': 'cot' if (spec.get('extra_params') or {}).get('use_cot') else 'direct',
             'score_multiplier': multiplier,
         },
@@ -239,15 +232,12 @@ def publish_benchmark_callback(
         'environment': {
             'framework': 'evalscope',
             'version': config.get('evalscope_version'),
-            'eval_type': config.get('eval_type')
+            'eval_type': config.get('eval_type'),
         },
         'sampling_config': config.get('generation_config') or {},
         'primary_metric': primary_metric,
         'metrics': metrics,
-        'diagnostics': {
-            'execution_summary': report.get('execution_summary'),
-            'samples_uploaded': len(samples)
-        },
+        'diagnostics': {'execution_summary': report.get('execution_summary'), 'samples_uploaded': len(samples)},
         'samples': samples,
         'comparison': comparison,
     }
@@ -270,7 +260,7 @@ def publish_benchmark_callback(
     base_url = os.environ['SCOREBOARD_API_BASE_URL']
     token = os.environ['SCOREBOARD_PUBLICATION_TOKEN']
     campaign_status, campaign_receipt = _send(
-        base_url, token, 'POST', '/api/v1/evaluation-campaigns', f"campaign:{campaign['run_key']}", campaign
+        base_url, token, 'POST', '/api/v1/evaluation-campaigns', f'campaign:{campaign["run_key"]}', campaign
     )
     # Scoreboard requires create, one atomic task PUT, then finalize.
     campaign_id = campaign_receipt['campaign_id']
@@ -281,7 +271,7 @@ def publish_benchmark_callback(
         base_url,
         token,
         'PUT',
-        f"/api/v1/evaluation-campaigns/{campaign_id}/tasks/{quote(task['identity'], safe='')}",
+        f'/api/v1/evaluation-campaigns/{campaign_id}/tasks/{quote(task["identity"], safe="")}',
         f'publish:{_sha256(task_publication)}',
         task_publication,
     )

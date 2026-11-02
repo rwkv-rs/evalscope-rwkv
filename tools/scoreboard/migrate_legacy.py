@@ -26,7 +26,7 @@ MIGRATION_CONTRACT = {
     'version': 1,
 }
 
-SOURCE_QUERY = r'''
+SOURCE_QUERY = r"""
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 COPY (
     SELECT payload
@@ -136,7 +136,7 @@ COPY (
              (payload ->> 'completion_id')::integer NULLS FIRST
 ) TO STDOUT WITH (FORMAT CSV);
 COMMIT;
-'''
+"""
 
 
 def canonical_json(value: Any) -> bytes:
@@ -183,7 +183,7 @@ def send(
     if body is not None:
         headers.update({'Content-Type': 'application/json', 'Content-Encoding': 'gzip'})
     request = Request(
-        f"{base_url.rstrip('/')}{path}",
+        f'{base_url.rstrip("/")}{path}',
         data=gzip.compress(body) if body is not None else None,
         method=method,
         headers=headers,
@@ -205,7 +205,7 @@ def publish_bundle(
         token,
         'POST',
         '/api/v1/evaluation-campaigns',
-        f"campaign:{campaign['run_key']}",
+        f'campaign:{campaign["run_key"]}',
         campaign,
         opener=opener,
     )
@@ -236,15 +236,9 @@ def publish_bundle(
         opener=opener,
     )
     return {
-        'campaign': {
-            'http_status': campaign_status,
-            **campaign_receipt
-        },
+        'campaign': {'http_status': campaign_status, **campaign_receipt},
         'tasks': task_receipts,
-        'finalize': {
-            'http_status': finalize_status,
-            **finalize_receipt
-        },
+        'finalize': {'http_status': finalize_status, **finalize_receipt},
     }
 
 
@@ -262,7 +256,7 @@ def _psql_command() -> tuple[list[str], dict[str, str]]:
         }
         missing = [name for name in names.values() if not os.environ.get(name)]
         if missing:
-            raise ValueError(f"missing legacy database settings: {', '.join(missing)}")
+            raise ValueError(f'missing legacy database settings: {", ".join(missing)}')
         for option, name in names.items():
             command.extend([f'--{option}', os.environ[name]])
     environment = dict(os.environ)
@@ -343,10 +337,12 @@ def _comparison_coordinate(
     models: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, str]] | None:
     parameters = _normalized_parameters(task['num_params'])
-    candidates = {(str(model['data_version']), str(model['model_name'])): model
-                  for model in models
-                  if str(model['arch_version']) == str(task['arch_version'])
-                  and _normalized_parameters(model['num_params']) == parameters}
+    candidates = {
+        (str(model['data_version']), str(model['model_name'])): model
+        for model in models
+        if str(model['arch_version']) == str(task['arch_version'])
+        and _normalized_parameters(model['num_params']) == parameters
+    }
     generations = sorted({generation for generation, _ in candidates})
     if len(generations) < 2 or str(task['data_version']) not in generations[-2:]:
         return None
@@ -447,10 +443,7 @@ def _sample(
             'pass_index': int(row['pass_index']),
             'subset': row.get('subset'),
         },
-        'metrics': {
-            **score_values, 'has_eval_record': has_eval,
-            'is_passed': row.get('is_passed')
-        },
+        'metrics': {**score_values, 'has_eval_record': has_eval, 'is_passed': row.get('is_passed')},
         'model_response': {
             'text': raw_completion,
             'stop_reason': stop_reason,
@@ -474,9 +467,9 @@ def _scalar_metrics(value: Any) -> dict[str, float]:
 def _task_identity(task: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
     benchmark = str(task['benchmark_name'])
     split = str(task.get('benchmark_split') or '')
-    task_name = f"{benchmark}#{task['task_id']}"
+    task_name = f'{benchmark}#{task["task_id"]}'
     return {
-        'identity': f"{mapping['weight_sha256']}:{mapping['wkv_mode']}:{task_name}",
+        'identity': f'{mapping["weight_sha256"]}:{mapping["wkv_mode"]}:{task_name}',
         'weight_sha256': mapping['weight_sha256'],
         'weight_display_name': mapping['weight_display_name'],
         'wkv_mode': mapping['wkv_mode'],
@@ -516,10 +509,7 @@ def _task_publication(
             'model': selected_model,
             'benchmark': {
                 'label': benchmark,
-                'categories': [{
-                    'id': 'function_call',
-                    'label': 'Function Call'
-                }],
+                'categories': [{'id': 'function_call', 'label': 'Function Call'}],
                 'evaluation_method': str(task['cot_mode']).lower(),
                 'score_multiplier': 100.0,
             },
@@ -544,9 +534,7 @@ def _task_publication(
             'config_path': task.get('config_path'),
             'git_hash': task.get('git_hash'),
         },
-        'environment': {
-            'framework': 'evalscope'
-        },
+        'environment': {'framework': 'evalscope'},
         'sampling_config': task.get('sampling_config') or {},
         'primary_metric': primary_metric,
         'metrics': metrics,
@@ -582,7 +570,7 @@ def build_migration_bundle(
         raise ValueError('legacy database contains no completed EvalScope scores')
     missing = sorted({str(task['model_name']) for task in tasks} - set(mappings))
     if missing:
-        raise ValueError(f"model map is missing: {', '.join(missing)}")
+        raise ValueError(f'model map is missing: {", ".join(missing)}')
     task_by_id = {int(task['task_id']): task for task in tasks}
 
     def publications() -> Iterable[dict[str, Any]]:
@@ -608,18 +596,28 @@ def build_migration_bundle(
         'schema_version': SCHEMA_VERSION,
         'run_key': '',
         'source': 'evalscope',
-        'config_sha256': json_sha256([{
-            'task_id': task['task_id'],
-            'config_path': task.get('config_path'),
-            'git_hash': task.get('git_hash'),
-            'sampling_config': task.get('sampling_config'),
-        } for task in tasks]),
-        'registry_sha256': json_sha256([{
-            'benchmark_id': task['benchmark_id'],
-            'benchmark_name': task['benchmark_name'],
-            'benchmark_split': task.get('benchmark_split'),
-            'benchmark_samples': task.get('benchmark_samples'),
-        } for task in tasks]),
+        'config_sha256': json_sha256(
+            [
+                {
+                    'task_id': task['task_id'],
+                    'config_path': task.get('config_path'),
+                    'git_hash': task.get('git_hash'),
+                    'sampling_config': task.get('sampling_config'),
+                }
+                for task in tasks
+            ]
+        ),
+        'registry_sha256': json_sha256(
+            [
+                {
+                    'benchmark_id': task['benchmark_id'],
+                    'benchmark_name': task['benchmark_name'],
+                    'benchmark_split': task.get('benchmark_split'),
+                    'benchmark_samples': task.get('benchmark_samples'),
+                }
+                for task in tasks
+            ]
+        ),
         'contract_sha256': json_sha256(MIGRATION_CONTRACT),
         'configured_benchmarks': benchmarks,
         'resolved_benchmarks': benchmarks,
