@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+import ast
 from pathlib import Path
 from typing import Any, Dict
 
@@ -12,6 +13,7 @@ from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
+from evalscope.utils.code_utils import completed_with_marker, new_completion_marker
 from evalscope.utils.logger import get_logger
 
 logger = get_logger()
@@ -65,7 +67,7 @@ MBPP Plus is a fortified version of the MBPP benchmark, created to improve evalu
         eval_split='test',
         prompt_template=PROMPT,
         review_timeout=60,
-        evaluation_version='v1.1',
+        evaluation_version='v1.2',
         sandbox_config={'image': 'python3.11-numpy', 'tools_config': {'shell_executor': {}, 'python_executor': {}}},
     )
 )
@@ -103,8 +105,10 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             code = code[: code.index('if __name__ ==')]
         return code
 
-    def get_sandbox_image_spec(self) -> DockerImageSpec:
+    def get_sandbox_image_spec(self) -> DockerImageSpec | None:
         """Use HumanEval+'s image: the MBPP+ test suites import numpy."""
+        if not self.uses_default_sandbox_image('python3.11-numpy'):
+            return None
         docker_path = Path(__file__).parent.parent / 'humanevalplus' / 'docker'
         return DockerImageSpec(
             name_prefix='python3.11-numpy',
@@ -131,6 +135,7 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
+        """Run the base and expanded tests; a pass requires the completion marker."""
 
         if not self.use_sandbox:
             raise RuntimeError(
@@ -143,11 +148,21 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             prediction=original_prediction,
         )
         problem = task_state.metadata
+        test = problem['test']
+        # Expanded EvalPlus tests are top-level asserts or a loop over inputs; anything else
+        # would make a passing run vacuous.
+        if not any(isinstance(node, (ast.Assert, ast.For)) for node in ast.parse(test).body):
+            raise ValueError('MBPP+ expanded test data contains no executable checks.')
+        # A random marker printed only after every check proves the suite ran to completion;
+        # an early sys.exit(0) in the solution cannot forge a pass.
+        marker = new_completion_marker('EVALSCOPE_MBPP_PLUS_PASSED')
         # Keep future imports at the start of the solution; test imports only need to precede the asserts.
-        completion = '\n'.join([filtered_prediction, *problem['test_imports'], *problem['test_list'], problem['test']])
+        completion = '\n'.join(
+            [filtered_prediction, *problem['test_imports'], *problem['test_list'], test, f'print("\\n" + {marker!r})']
+        )
 
         res = self.execute_code_in_sandbox(code=completion, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success'
+        passed = completed_with_marker(res, marker)
         # Set score values
         score.value = {'acc': passed}
         score.metadata = {'task_id': problem['task_id'], 'timeout': self.review_timeout, 'execution_result': res}

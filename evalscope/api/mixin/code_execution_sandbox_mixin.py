@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 from evalscope.api.sandbox import (
+    DockerImageBuilder,
     DockerImageSpec,
     PoolHandle,
     SandboxEngine,
@@ -64,6 +65,13 @@ class CodeExecutionBackend(ABC):
         """Release any sandbox-local resources (not the service itself)."""
 
 
+def _is_remote_manager(manager_config: Dict[str, Any]) -> bool:
+    """Mirror ms_enclave's factory: a ``base_url`` or a non-local manager type runs remotely."""
+    manager_type = manager_config.get('manager_type')
+    manager_type = str(getattr(manager_type, 'value', manager_type) or '').lower()
+    return bool(manager_config.get('base_url')) or manager_type not in ('', 'local')
+
+
 class EnclaveCodeExecutionBackend(CodeExecutionBackend):
     """ms_enclave-backed code execution pool delegating to :class:`SandboxService`."""
 
@@ -98,10 +106,20 @@ class EnclaveCodeExecutionBackend(CodeExecutionBackend):
         if engine is SandboxEngine.DOCKER:
             image_spec = self._image_spec_provider() if self._image_spec_provider is not None else None
             if image_spec is not None:
-                result = prepare_docker_image(image_spec)
                 sandbox_cfg_dict = dict(sandbox_cfg_dict)
+                if _is_remote_manager(manager_config):
+                    # Containers run on the remote daemon: a local build is neither possible on a
+                    # Docker-less client nor visible remotely. Use the same content-addressed tag.
+                    result = DockerImageBuilder().resolve(image_spec)
+                    logger.warning(
+                        f'Remote sandbox manager: image {result.image_tag!r} must exist on the remote Docker '
+                        f'daemon (build it there with: docker build -t {result.image_tag} '
+                        f'-f {image_spec.dockerfile} {image_spec.context_dir}).'
+                    )
+                else:
+                    result = prepare_docker_image(image_spec)
+                    logger.info(f'Sandbox image prepared: {result.image_tag} (reused={result.reused})')
                 sandbox_cfg_dict['image'] = result.image_tag
-                logger.info(f'Sandbox image prepared: {result.image_tag} (reused={result.reused})')
 
         self._pool_handle = build_and_acquire_pool_sync(
             engine=engine,
@@ -220,6 +238,11 @@ class CodeExecutionSandboxMixin:
     def get_sandbox_image_spec(self) -> Optional[DockerImageSpec]:
         """Return a benchmark-level Docker image spec for the code execution pool, if needed."""
         return None
+
+    def uses_default_sandbox_image(self, default_image: str) -> bool:
+        """Whether the user kept ``default_image``; a returned image spec would replace any override."""
+        task_image = self._task_config.sandbox.default_config.get('image') if self._task_config else None
+        return not task_image and self.sandbox_config.get('image') == default_image
 
     @thread_safe
     def ensure_sandbox_ready(self) -> bool:

@@ -9,7 +9,7 @@ from evalscope.api.agent import AgentLoopResult
 from evalscope.api.dataset import DataLoader, Dataset, DatasetDict, LocalDataLoader, RemoteDataLoader, Sample
 from evalscope.api.dataset.loader import dataset_loading_session
 from evalscope.api.evaluator import InferenceResult, InferenceReturn, TaskState
-from evalscope.api.messages import ChatMessage, ChatMessageSystem, ChatMessageUser
+from evalscope.api.messages import ChatMessage, ChatMessageSystem, ChatMessageUser, split_final_answer
 from evalscope.api.metric import AggScore, MetricUnavailableError, SampleScore, Score
 from evalscope.api.model import Model, ModelOutput
 from evalscope.api.model.decision import DECISION_EVAL_TYPES
@@ -629,6 +629,10 @@ class DefaultDataAdapter(DataAdapter):
         Returns:
             str: The filtered and extracted prediction ready for evaluation
         """
+        # Reasoning is never an answer: drop an unclosed thought (no final answer exists) or the
+        # reasoning before a template-opened ``</think>`` before any extractor sees the text.
+        prediction, _ = split_final_answer(prediction)
+
         if self.filter_ensemble is not None:
             # Apply configured filters to clean the prediction
             prediction = self.filter_ensemble(prediction)
@@ -804,6 +808,14 @@ class DefaultDataAdapter(DataAdapter):
                 explanation=str(exc),
                 metadata={'metric_unavailable': True, 'error': str(exc)},
             )
+
+        _, reasoning_boundary = split_final_answer(prediction)
+        if reasoning_boundary is not None:
+            # The raw response stays in ``prediction``; this records why the answer was cut.
+            final_score.metadata = {**(final_score.metadata or {}), 'reasoning_boundary': reasoning_boundary}
+            if reasoning_boundary == 'unclosed':
+                final_score.metadata['final_answer_missing'] = True
+                final_score.metadata['stop_reason'] = task_state.output.stop_reason if task_state.output else None
 
         # Package the results into a sample score object
         sample_score = SampleScore(

@@ -7,6 +7,7 @@ This module provides:
 """
 
 import re
+import secrets
 from enum import Enum
 from typing import List, Literal, Optional, Tuple
 
@@ -768,3 +769,17 @@ def find_inner_function_body(signature_pattern: str, completion: str) -> Optiona
     if idx is None or brackets_count != 0:
         return None
     return (matches.start(), idx + 1)
+
+
+def new_completion_marker(prefix: str) -> str:
+    """Random marker to print after the last check of a test program.
+
+    A generated solution cannot forge it, so a pass requires the suite to run to completion
+    (an early ``sys.exit(0)`` is not a pass).
+    """
+    return f'{prefix}_{secrets.token_hex(16)}'
+
+
+def completed_with_marker(result: dict, marker: str) -> bool:
+    """Whether a sandbox execution succeeded and printed ``marker`` on its own line."""
+    return result.get('status') == 'success' and marker in str(result.get('output', '')).splitlines()

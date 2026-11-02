@@ -11,4 +11,4 @@ from .chat_message import (
 )
 from .content import Content, ContentAudio, ContentData, ContentImage, ContentReasoning, ContentText, ContentVideo
 from .perf_metrics import PerformanceMetrics, PerfSummary
-from .utils import parse_content_with_reasoning
+from .utils import parse_content_with_reasoning, split_final_answer

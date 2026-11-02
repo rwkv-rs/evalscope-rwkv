@@ -44,13 +44,20 @@ class DockerImageBuilder:
 
     builder_version: str = 'v1'
 
-    def build_or_reuse(self, spec: DockerImageSpec) -> DockerImageResult:
-        context_dir, dockerfile = normalize_docker_build_context(spec.context_dir, spec.dockerfile)
+    def resolve(self, spec: DockerImageSpec) -> DockerImageResult:
+        """Compute the content-addressed tag for ``spec`` without contacting a Docker daemon."""
+        context_dir, _ = normalize_docker_build_context(spec.context_dir, spec.dockerfile)
         context_hash = hash_build_context(
             context_dir,
             cache_key_parts=[self.builder_version, *spec.cache_key_parts, *_build_args_cache_parts(spec.build_args)],
         )
         image_tag = f'{_sanitize_tag_part(spec.name_prefix)}:{context_hash[:24]}'
+        return DockerImageResult(image_tag=image_tag, reused=True, context_hash=context_hash)
+
+    def build_or_reuse(self, spec: DockerImageSpec) -> DockerImageResult:
+        context_dir, dockerfile = normalize_docker_build_context(spec.context_dir, spec.dockerfile)
+        resolved = self.resolve(spec)
+        image_tag, context_hash = resolved.image_tag, resolved.context_hash
         should_build = spec.force_rebuild or should_build_docker_image(image_tag)
         if should_build:
             logger.info(f'Docker image {image_tag!r} not found or rebuild requested. Building from {context_dir} ...')

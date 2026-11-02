@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
+from pathlib import Path
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -12,16 +13,9 @@ from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
+from evalscope.utils.code_utils import completed_with_marker, new_completion_marker
 
-# Mirrors the official harness: load only TestCases and fail on any failure or error.
-_RUN_TEST_CASES = """
-
-import sys as _sys
-import unittest as _unittest
-
-_result = _unittest.TextTestRunner().run(_unittest.defaultTestLoader.loadTestsFromTestCase(TestCases))
-_sys.exit(0 if _result.wasSuccessful() else 1)
-"""
+from .utils import EMPTY_SUITE_ERROR, build_test_program
 
 DESCRIPTION = """
 ## Overview
@@ -135,7 +129,7 @@ _SANDBOX_CONFIG = {
         review_timeout=240,
         extra_params=_EXTRA_PARAMS,
         sandbox_config=_SANDBOX_CONFIG,
-        evaluation_version='v1.1',
+        evaluation_version='v1.2',
     )
 )
 class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
@@ -154,10 +148,12 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             self.eval_split = version
 
     def get_sandbox_image_spec(self) -> DockerImageSpec | None:
-        """Return an optional user-provided local Docker image build spec."""
+        """Prepare the dependency image for pooled execution, or use a custom build."""
         build_context = self.extra_params.get('docker_build_context') or ''
         if not build_context:
-            return None
+            if not self.uses_default_sandbox_image(_SANDBOX_CONFIG['image']):
+                return None
+            build_context = str(Path(__file__).parent / 'docker')
         return DockerImageSpec(
             name_prefix=f'evalscope-{self.name}',
             context_dir=build_context,
@@ -213,13 +209,14 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         if self._calibrate:
             solution = problem['code_prompt'] + '\n    pass\n' + solution
 
-        # Construct full test program: solution + unittest test class. The dataset's test only defines
-        # TestCases, so run it explicitly (as the official harness does) and exit non-zero on any failure.
-        check_program = solution + '\n' + problem['test'] + _RUN_TEST_CASES
+        marker = new_completion_marker('EVALSCOPE_BCB_PASSED')
+        check_program = build_test_program(solution, problem['test'], marker)
 
         # Execute in sandbox
         res = self.execute_code_in_sandbox(code=check_program, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success'
+        if EMPTY_SUITE_ERROR in str(res.get('error', '')):
+            raise RuntimeError('BigCodeBench test data did not produce any unittest cases.')
+        passed = completed_with_marker(res, marker)
 
         # Set score values
         score.value = {'acc': passed}
@@ -250,7 +247,7 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         review_timeout=240,
         extra_params=_EXTRA_PARAMS,
         sandbox_config=_SANDBOX_CONFIG,
-        evaluation_version='v1.1',
+        evaluation_version='v1.2',
     )
 )
 class BigCodeBenchHardAdapter(BigCodeBenchAdapter):
