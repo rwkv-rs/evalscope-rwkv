@@ -5,7 +5,7 @@ from typing import Optional
 import pytest
 from openai.types.chat import ChatCompletionChunk
 
-from evalscope.api.model import GenerateConfig, ModelOutput, ModelUsage
+from evalscope.api.model import GenerateConfig
 from evalscope.models.openai_compatible import OpenAICompatibleAPI
 
 
@@ -100,10 +100,10 @@ def test_generate_async_retries_when_stream_consumption_fails(monkeypatch):
     assert result.content == 'complete response'
 
 
-def _completion_api(monkeypatch: pytest.MonkeyPatch, **model_args) -> OpenAICompatibleAPI:
+def _completion_api(monkeypatch: pytest.MonkeyPatch) -> OpenAICompatibleAPI:
     from openai.types.chat import ChatCompletion
 
-    api = OpenAICompatibleAPI('test-model', base_url='https://example.test/v1', api_key='k', **model_args)
+    api = OpenAICompatibleAPI('test-model', base_url='https://example.test/v1', api_key='k')
     completion = ChatCompletion.model_validate({
         'id': 'c', 'object': 'chat.completion', 'created': 1, 'model': 'test-model',
         'prompt_text': 'User: hi\nAssistant:',
@@ -117,30 +117,9 @@ def _completion_api(monkeypatch: pytest.MonkeyPatch, **model_args) -> OpenAIComp
     return api
 
 
-def test_server_stop_reason_is_preserved_at_exact_output_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Finding 7: a normally finished response at the exact budget must stay ``stop``."""
-    output = _completion_api(monkeypatch).generate([], [], None, GenerateConfig(max_tokens=4, stream=False))
-    assert output.stop_reason == 'stop'
-    assert 'stop_reason_corrected' not in (output.metadata or {})
-
-
 def test_server_audit_fields_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Finding 8: the server-rendered prompt and matched stop are preserved."""
+    """The server-rendered prompt and the matched stop string are kept in metadata."""
     output = _completion_api(monkeypatch).generate([], [], None, GenerateConfig(max_tokens=64, stream=False))
     assert output.metadata['prompt_text'] == 'User: hi\nAssistant:'
     assert output.metadata['server_stop_reasons'] == {'0': '\nUser:'}
 
-
-def test_explicit_output_limit_correction_records_server_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    api = _completion_api(monkeypatch, stop_reason_correction='output_limit')
-    at_limit = api.generate([], [], None, GenerateConfig(max_tokens=4, stream=False))
-    assert at_limit.stop_reason == 'max_tokens'
-    assert at_limit.metadata['server_stop_reason'] == 'stop'
-    assert at_limit.metadata['stop_reason_corrected'] == 'output_limit'
-    below = api.generate([], [], None, GenerateConfig(max_tokens=5, stream=False))
-    assert below.stop_reason == 'stop'
-
-
-def test_unknown_stop_reason_correction_is_rejected() -> None:
-    with pytest.raises(ValueError, match='stop_reason_correction'):
-        OpenAICompatibleAPI('test-model', base_url='https://example.test/v1', api_key='k', stop_reason_correction='x')

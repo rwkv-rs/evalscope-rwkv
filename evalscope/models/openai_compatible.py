@@ -58,33 +58,7 @@ NON_RETRYABLE_OPENAI_ERRORS: Tuple[Type[Exception], ...] = (
 _NON_RETRYABLE_COMPLETION_ERRORS = (*NON_RETRYABLE_OPENAI_ERRORS, _NonRetryableEmptyCompletionError)
 
 
-OUTPUT_LIMIT_STOP_REASON_CORRECTION = 'output_limit'
-"""``model_args['stop_reason_correction']`` value for servers known to report ``stop`` at the limit."""
-
-
-def _correct_output_limit_stop_reason(output: ModelOutput, config: GenerateConfig) -> None:
-    """Relabel ``stop`` as ``max_tokens`` when the output consumed the whole budget.
-
-    Only applied when a model explicitly opts in through ``stop_reason_correction``: a response
-    that ends naturally exactly at the limit is indistinguishable here and would be relabelled
-    too. The server-reported value is kept in ``output.metadata``.
-    """
-    if config.max_tokens is None or output.usage is None or not output.choices:
-        return
-    if output.stop_reason != 'stop' or output.usage.output_tokens < config.max_tokens:
-        return
-    output.choices[0].stop_reason = 'max_tokens'
-    output.metadata = {
-        **(output.metadata or {}),
-        'server_stop_reason': 'stop',
-        'stop_reason_corrected': OUTPUT_LIMIT_STOP_REASON_CORRECTION,
-    }
-
-
 class OpenAICompatibleAPI(ModelAPI):
-    stop_reason_correction: Optional[str] = None
-    """Opt-in correction of server stop reasons; ``None`` preserves them."""
-
     def __init__(
         self,
         model_name: str,
@@ -100,11 +74,6 @@ class OpenAICompatibleAPI(ModelAPI):
             api_key=api_key,
             config=config,
         )
-
-        # Server stop reasons are preserved unless a model explicitly opts into a correction.
-        self.stop_reason_correction = model_args.pop('stop_reason_correction', None)
-        if self.stop_reason_correction not in (None, OUTPUT_LIMIT_STOP_REASON_CORRECTION):
-            raise ValueError(f'Unsupported stop_reason_correction: {self.stop_reason_correction!r}')
 
         # use service prefix to lookup api_key
         self.api_key = api_key or os.environ.get('EVALSCOPE_API_KEY', None)
@@ -206,8 +175,6 @@ class OpenAICompatibleAPI(ModelAPI):
             # return output and call
             choices = self.chat_choices_from_completion(completion, tools)
             output = model_output_from_openai(completion, choices)
-            if self.stop_reason_correction == OUTPUT_LIMIT_STOP_REASON_CORRECTION:
-                _correct_output_limit_stop_reason(output, config)
 
             # Populate timing fields
             output.time = total_time
@@ -292,8 +259,6 @@ class OpenAICompatibleAPI(ModelAPI):
             # Return output
             choices = self.chat_choices_from_completion(completion, tools)
             output = model_output_from_openai(completion, choices)
-            if self.stop_reason_correction == OUTPUT_LIMIT_STOP_REASON_CORRECTION:
-                _correct_output_limit_stop_reason(output, config)
 
             output.time = total_time
             usage = output.usage
