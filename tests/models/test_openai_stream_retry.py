@@ -98,3 +98,28 @@ def test_generate_async_retries_when_stream_consumption_fails(monkeypatch):
 
     assert attempts == 2
     assert result.content == 'complete response'
+
+
+def _completion_api(monkeypatch: pytest.MonkeyPatch) -> OpenAICompatibleAPI:
+    from openai.types.chat import ChatCompletion
+
+    api = OpenAICompatibleAPI('test-model', base_url='https://example.test/v1', api_key='k')
+    completion = ChatCompletion.model_validate({
+        'id': 'c', 'object': 'chat.completion', 'created': 1, 'model': 'test-model',
+        'prompt_text': 'User: hi\nAssistant:',
+        'usage': {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 7},
+        'choices': [{
+            'index': 0, 'finish_reason': 'stop', 'stop_reason': '\nUser:',
+            'message': {'role': 'assistant', 'content': 'done'},
+        }],
+    })
+    monkeypatch.setattr(api.client.chat.completions, 'create', lambda **kwargs: completion)
+    return api
+
+
+def test_server_audit_fields_are_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server-rendered prompt and the matched stop string are kept in metadata."""
+    output = _completion_api(monkeypatch).generate([], [], None, GenerateConfig(max_tokens=64, stream=False))
+    assert output.metadata['prompt_text'] == 'User: hi\nAssistant:'
+    assert output.metadata['server_stop_reasons'] == {'0': '\nUser:'}
+
