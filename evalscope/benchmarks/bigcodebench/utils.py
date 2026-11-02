@@ -12,7 +12,7 @@ def build_test_program(solution: str, test: str, marker: str) -> str:
         raise ValueError('BigCodeBench test data contains no test classes.')
 
     # Load only dataset classes; generated code may define unrelated test classes.
-    runner = f'''
+    runner = f"""
 import unittest as _evalscope_unittest
 _evalscope_suite = _evalscope_unittest.TestSuite()
 for _evalscope_name in {classes!r}:
@@ -25,5 +25,5 @@ _evalscope_result = _evalscope_unittest.TextTestRunner(verbosity=1).run(_evalsco
 if not _evalscope_result.wasSuccessful():
     raise AssertionError('BigCodeBench tests failed')
 print('\\n' + {marker!r})
-'''
+"""
     return solution + '\n' + test + '\n' + runner

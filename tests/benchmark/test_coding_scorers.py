@@ -137,10 +137,10 @@ def test_mbpp_plus_runs_expanded_tests(make_adapter: Callable[..., Any], solutio
     assert score.metadata['timeout'] == 120
 
 
-def test_mbpp_plus_keeps_prompt_examples_and_supports_string_imports(make_adapter: Callable[..., Any]) -> None:
+def test_mbpp_plus_keeps_prompt_examples_out_of_hidden_tests(make_adapter: Callable[..., Any]) -> None:
     adapter = make_adapter('mbpp_plus')
     record = dict(mbpp_state().metadata, prompt='Return the square.', code='def square(x): return x * x', source_file='test')
-    record['test_imports'] = 'from math import isclose'
+    record['test_imports'] = ['from math import isclose']
     sample = adapter.record_to_sample(record)
     prompt = adapter.format_prompt_template(sample)
     assert 'assert square(1) == 1' in prompt

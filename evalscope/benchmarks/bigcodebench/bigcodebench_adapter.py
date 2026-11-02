@@ -1,6 +1,5 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
-import secrets
 from pathlib import Path
 from typing import Any, Dict
 
@@ -14,6 +13,7 @@ from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
 from evalscope.constants import Tags
+from evalscope.utils.code_utils import completed_with_marker, new_completion_marker
 
 from .utils import EMPTY_SUITE_ERROR, build_test_program
 
@@ -209,14 +209,14 @@ class BigCodeBenchAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         if self._calibrate:
             solution = problem['code_prompt'] + '\n    pass\n' + solution
 
-        marker = 'EVALSCOPE_BCB_PASSED_' + secrets.token_hex(16)
+        marker = new_completion_marker('EVALSCOPE_BCB_PASSED')
         check_program = build_test_program(solution, problem['test'], marker)
 
         # Execute in sandbox
         res = self.execute_code_in_sandbox(code=check_program, timeout=self.review_timeout, language='python')
         if EMPTY_SUITE_ERROR in str(res.get('error', '')):
             raise RuntimeError('BigCodeBench test data did not produce any unittest cases.')
-        passed = res.get('status') == 'success' and marker in str(res.get('output', '')).splitlines()
+        passed = completed_with_marker(res, marker)
 
         # Set score values
         score.value = {'acc': passed}

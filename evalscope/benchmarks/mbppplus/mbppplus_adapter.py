@@ -1,7 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
 import ast
-import secrets
+from pathlib import Path
 from typing import Any, Dict
 
 from evalscope.api.benchmark import BenchmarkMeta, DefaultDataAdapter
@@ -12,8 +12,8 @@ from evalscope.api.metric.semantics import MetricSelector
 from evalscope.api.mixin import CodeExecutionSandboxMixin
 from evalscope.api.registry import register_benchmark
 from evalscope.api.sandbox import DockerImageSpec
-from evalscope.benchmarks.humanevalplus.humanevalplus_adapter import numpy_image_spec
 from evalscope.constants import Tags
+from evalscope.utils.code_utils import completed_with_marker, new_completion_marker
 from evalscope.utils.logger import get_logger
 
 logger = get_logger()
@@ -67,7 +67,6 @@ MBPP Plus is a fortified version of the MBPP benchmark, created to improve evalu
         eval_split='test',
         prompt_template=PROMPT,
         review_timeout=60,
-        # v1.2: completion marker and non-vacuous suite check on top of upstream's v1.1 fix.
         evaluation_version='v1.2',
         sandbox_config={'image': 'python3.11-numpy', 'tools_config': {'shell_executor': {}, 'python_executor': {}}},
     )
@@ -79,10 +78,6 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
-    def get_sandbox_image_spec(self) -> DockerImageSpec | None:
-        """Reuse the HumanEval+ NumPy image needed by the expanded EvalPlus tests."""
-        return numpy_image_spec() if self.uses_default_sandbox_image('python3.11-numpy') else None
 
     def record_to_sample(self, record: Dict[str, Any]) -> Sample:
         """Convert a data record to a Sample object."""
@@ -110,6 +105,18 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
             code = code[: code.index('if __name__ ==')]
         return code
 
+    def get_sandbox_image_spec(self) -> DockerImageSpec | None:
+        """Use HumanEval+'s image: the MBPP+ test suites import numpy."""
+        if not self.uses_default_sandbox_image('python3.11-numpy'):
+            return None
+        docker_path = Path(__file__).parent.parent / 'humanevalplus' / 'docker'
+        return DockerImageSpec(
+            name_prefix='python3.11-numpy',
+            context_dir=docker_path.as_posix(),
+            dockerfile=(docker_path / 'Dockerfile').as_posix(),
+            cache_key_parts=['sandbox', 'python3.11-numpy'],
+        )
+
     @classmethod
     def postprocess_completion(cls, completion, stop_words=['\nassert', '\n"""']):
         from evalscope.utils.code_utils import extract_code_from_freeform_completion
@@ -128,7 +135,7 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
     def match_score(
         self, original_prediction: str, filtered_prediction: str, reference: str, task_state: TaskState
     ) -> Score:
-        """Execute the complete expanded tests, retaining test_list only in the prompt."""
+        """Run the base and expanded tests; a pass requires the completion marker."""
 
         if not self.use_sandbox:
             raise RuntimeError(
@@ -146,26 +153,19 @@ class MBPPplusAdapter(CodeExecutionSandboxMixin, DefaultDataAdapter):
         # would make a passing run vacuous.
         if not any(isinstance(node, (ast.Assert, ast.For)) for node in ast.parse(test).body):
             raise ValueError('MBPP+ expanded test data contains no executable checks.')
-        imports = problem.get('test_imports') or []
-        if isinstance(imports, str):
-            imports = [imports]
         # A random marker printed only after every check proves the suite ran to completion;
         # an early sys.exit(0) in the solution cannot forge a pass.
-        marker = 'EVALSCOPE_MBPP_PLUS_PASSED_' + secrets.token_hex(16)
+        marker = new_completion_marker('EVALSCOPE_MBPP_PLUS_PASSED')
         # Keep future imports at the start of the solution; test imports only need to precede the asserts.
         completion = '\n'.join(
-            [filtered_prediction, *imports, *problem['test_list'], test, f'print("\\n" + {marker!r})']
+            [filtered_prediction, *problem['test_imports'], *problem['test_list'], test, f'print("\\n" + {marker!r})']
         )
 
         res = self.execute_code_in_sandbox(code=completion, timeout=self.review_timeout, language='python')
-        passed = res.get('status') == 'success' and marker in str(res.get('output', '')).splitlines()
+        passed = completed_with_marker(res, marker)
         # Set score values
         score.value = {'acc': passed}
-        score.metadata = {
-            'task_id': problem['task_id'],
-            'timeout': self.review_timeout,
-            'execution_result': res,
-        }
+        score.metadata = {'task_id': problem['task_id'], 'timeout': self.review_timeout, 'execution_result': res}
         score.main_score_name = 'acc'
 
         return score

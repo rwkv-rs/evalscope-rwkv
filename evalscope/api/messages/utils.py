@@ -3,6 +3,10 @@ from typing import Optional
 
 from .content import ContentReasoning
 
+# ``<think>`` opening tag with optional attributes.
+_THINK_OPEN = r'<think(?:\s+signature="([^"]*)")?(?:\s+redacted="(true)")?\s*>'
+_THINK_CLOSE = '</think>'
+
 
 def parse_content_with_reasoning(content: str) -> tuple[str, Optional[ContentReasoning]]:
     """
@@ -13,8 +17,7 @@ def parse_content_with_reasoning(content: str) -> tuple[str, Optional[ContentRea
     - The second element is a ContentReasoning object (or None if no <think> tag is found).
     """
     # Match <think> tag with optional attributes anywhere in the string
-    pattern = r'<think(?:\s+signature="([^"]*)")?(?:\s+redacted="(true)")?\s*>(.*?)</think>'
-    match = re.search(pattern, content, re.DOTALL)
+    match = re.search(_THINK_OPEN + r'(.*?)' + _THINK_CLOSE, content, re.DOTALL)
 
     if match:
         signature = match.group(1)  # This will be None if not present
@@ -35,10 +38,6 @@ def parse_content_with_reasoning(content: str) -> tuple[str, Optional[ContentRea
         return content, None
 
 
-_THINK_OPEN = re.compile(r'<think(?:\s+signature="[^"]*")?(?:\s+redacted="true")?\s*>')
-_THINK_CLOSE = '</think>'
-
-
 def split_final_answer(text: str) -> tuple[str, Optional[str]]:
     """Return the final-answer text of a completion and the reasoning boundary that was applied.
 
@@ -52,11 +51,9 @@ def split_final_answer(text: str) -> tuple[str, Optional[str]]:
 
     Text without either shape is returned unchanged with boundary ``None``.
     """
-    opening = None
-    for opening in _THINK_OPEN.finditer(text):
-        pass
-    if opening is not None and _THINK_CLOSE not in text[opening.end():]:
-        return text[:opening.start()].rstrip(), 'unclosed'
-    if _THINK_CLOSE in text and _THINK_OPEN.search(text) is None:
+    openings = list(re.finditer(_THINK_OPEN, text))
+    if openings and _THINK_CLOSE not in text[openings[-1].end() :]:
+        return text[: openings[-1].start()].rstrip(), 'unclosed'
+    if not openings and _THINK_CLOSE in text:
         return text.rsplit(_THINK_CLOSE, 1)[1].lstrip(), 'closed_without_opening'
     return text, None
