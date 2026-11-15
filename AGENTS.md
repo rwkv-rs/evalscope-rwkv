@@ -177,3 +177,7 @@ make dev      # once
 make lint     # apply fixes and run all checks before every commit
 pytest tests/cli/test_all.py::TestRun::test_ci_lite -v -s -p no:warnings
 ```
+
+## Pull request review
+
+Before reviewing or re-reviewing a pull request, read the [pull request review guide](.github/PR_REVIEW.md) and follow its rules.
