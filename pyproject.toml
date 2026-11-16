@@ -107,7 +107,7 @@ include = [
   "pyproject.toml",
   "*.py",
   "evalscope/**/*.py",
-  "scripts/release/**/*.py",
+  "tools/**/*.py",
   "tests/**/*.py",
 ]
 extend-exclude = [
